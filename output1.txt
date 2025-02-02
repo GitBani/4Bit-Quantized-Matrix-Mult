@@ -1,0 +1,80 @@
+Float: -2.4855652
+Unsigned q: 7, back: -6.6666665
+Symm q: 0, back: 0
+
+Float: 56.656357
+Unsigned q: 12, back: 60
+Symm q: 4, back: 57.142857
+
+Float: 14.900757
+Unsigned q: 9, back: 20
+Symm q: 1, back: 14.285714
+
+Float: 84.04303
+Unsigned q: 14, back: 86.666664
+Symm q: 6, back: 85.71429
+
+Float: -12.939194
+Unsigned q: 7, back: -6.6666665
+Symm q: -1, back: -14.285714
+
+Float: -7.2741547
+Unsigned q: 7, back: -6.6666665
+Symm q: -1, back: -14.285714
+
+Float: -6.115082
+Unsigned q: 7, back: -6.6666665
+Symm q: 0, back: 0
+
+Float: 15.17997
+Unsigned q: 9, back: 20
+Symm q: 1, back: 14.285714
+
+Float: 14.981911
+Unsigned q: 9, back: 20
+Symm q: 1, back: 14.285714
+
+Float: 84.85492
+Unsigned q: 14, back: 86.666664
+Symm q: 6, back: 85.71429
+
+Float: 21.656395
+Unsigned q: 9, back: 20
+Symm q: 2, back: 28.571428
+
+Float: 29.66072
+Unsigned q: 10, back: 33.333332
+Symm q: 2, back: 28.571428
+
+Float: 96.97037
+Unsigned q: 15, back: 100
+Symm q: 7, back: 100
+
+Float: 0.37922668
+Unsigned q: 8, back: 6.6666665
+Symm q: 0, back: 0
+
+Float: 12.13813
+Unsigned q: 8, back: 6.6666665
+Symm q: 1, back: 14.285714
+
+Float: -40.433167
+Unsigned q: 4, back: -46.666664
+Symm q: -3, back: -42.857143
+
+Float: 36.801437
+Unsigned q: 10, back: 33.333332
+Symm q: 3, back: 42.857143
+
+Float: 58.48758
+Unsigned q: 12, back: 60
+Symm q: 4, back: 57.142857
+
+Float: 71.95291
+Unsigned q: 13, back: 73.33333
+Symm q: 5, back: 71.42857
+
+Float: -40.527058
+Unsigned q: 4, back: -46.666664
+Symm q: -3, back: -42.857143
+
