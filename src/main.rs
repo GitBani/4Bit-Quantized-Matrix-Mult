@@ -1,7 +1,8 @@
 mod quantization;
 
-use quantization::QuantizationScheme4Bit;
-use quantization::{affine_symmetric::AffineSymmetric, affine_unsigned::AffineUnsigned};
+use quantization::affine_symmetric::AffineSymmetric;
+use quantization::affine_unsigned::AffineUnsigned;
+use quantization::Quantizer4Bit;
 use rand::Rng;
 
 fn main() {
@@ -9,9 +10,8 @@ fn main() {
     let mut rng = rand::rng();
     let min_val = -100.0;
     let max_val = 100.0;
-    let unsigned_scheme = QuantizationScheme4Bit::Unsigned(AffineUnsigned::new(min_val, max_val));
-    let symmetric_scheme =
-        QuantizationScheme4Bit::Symmetric(AffineSymmetric::new(min_val, max_val));
+    let unsigned_scheme = AffineUnsigned::new(min_val, max_val);
+    let symmetric_scheme = AffineSymmetric::new(min_val, max_val);
 
     for _ in 0..20 {
         let f = rng.random_range(min_val..=max_val);

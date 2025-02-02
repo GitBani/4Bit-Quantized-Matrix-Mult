@@ -1,3 +1,6 @@
+use super::Quantizer4Bit;
+
+/// 4 bit quantization scheme where quantized values range from 0 to 15
 pub struct AffineUnsigned {
     scale: f32,
     zero: f32,
@@ -9,12 +12,14 @@ impl AffineUnsigned {
         let zero = -min_val / scale;
         AffineUnsigned { scale, zero }
     }
+}
 
-    pub fn quantize(&self, real_val: f32) -> i8 {
+impl Quantizer4Bit for AffineUnsigned {
+    fn quantize(&self, real_val: f32) -> i8 {
         ((real_val / self.scale + self.zero).round() as i8).clamp(0, 15)
     }
 
-    pub fn dequantize(&self, q_val: i8) -> f32 {
+    fn dequantize(&self, q_val: i8) -> f32 {
         self.scale * (q_val as f32 - self.zero)
     }
 }
