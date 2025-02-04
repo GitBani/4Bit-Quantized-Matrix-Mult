@@ -1,3 +1,4 @@
+mod matrices;
 mod quantization;
 
 use quantization::affine_symmetric::AffineSymmetric;
