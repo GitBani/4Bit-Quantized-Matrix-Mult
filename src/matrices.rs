@@ -60,16 +60,16 @@ where
 
 impl Matrix<f32> {
     /// Quantize and pack values into a row-major matrix
-    pub fn quantize_lhs(lhs: &Self, quantizer: &impl Quantizer4Bit) -> Matrix<u8> {
-        let mut quantized_lhs = Matrix::<u8>::new_quantized(lhs.rows, lhs.cols);
-        Self::quantize(&lhs, &mut quantized_lhs, quantizer);
+    pub fn quantize_lhs(&self, quantizer: &impl Quantizer4Bit) -> Matrix<u8> {
+        let mut quantized_lhs = Matrix::<u8>::new_quantized(self.rows, self.cols);
+        Self::quantize(&self, &mut quantized_lhs, quantizer);
         quantized_lhs
     }
 
     /// Quantize and pack values into a column-major matrix
-    pub fn quantize_rhs(rhs: &Self, quantizer: &impl Quantizer4Bit) -> Matrix<u8> {
-        let mut quantized_rhs = Matrix::<u8>::new_quantized(rhs.rows, rhs.cols);
-        Self::quantize(&rhs.transpose(), &mut quantized_rhs, quantizer);
+    pub fn quantize_rhs(&self, quantizer: &impl Quantizer4Bit) -> Matrix<u8> {
+        let mut quantized_rhs = Matrix::<u8>::new_quantized(self.cols, self.rows);
+        Self::quantize(&self.transpose(), &mut quantized_rhs, quantizer);
         quantized_rhs
     }
 
@@ -110,7 +110,7 @@ mod tests {
     // }
 
     #[test]
-    fn quantize_lhs() {
+    fn quantize_lhs_odd_number_entries() {
         let lhs: Matrix<f32> = Matrix {
             data: vec![
                 1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15.,
@@ -135,12 +135,41 @@ mod tests {
             cols: 5,
         };
 
-        assert_eq!(expected, Matrix::quantize_lhs(&lhs, &quantizer));
+        assert_eq!(expected, lhs.quantize_lhs(&quantizer));
     }
 
     #[test]
-    fn quantize_rhs() {
+    fn quantize_lhs_even_number_entries() {
         let lhs: Matrix<f32> = Matrix {
+            data: vec![
+                1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16.,
+            ],
+            rows: 4,
+            cols: 4,
+        };
+        let quantizer = AffineQuantizer::new(1.0, 16.0);
+
+        let expected = Matrix {
+            data: vec![
+                quantize_and_pack(&quantizer, 1., 2.),
+                quantize_and_pack(&quantizer, 3., 4.),
+                quantize_and_pack(&quantizer, 5., 6.),
+                quantize_and_pack(&quantizer, 7., 8.),
+                quantize_and_pack(&quantizer, 9., 10.),
+                quantize_and_pack(&quantizer, 11., 12.),
+                quantize_and_pack(&quantizer, 13., 14.),
+                quantize_and_pack(&quantizer, 15., 16.),
+            ],
+            rows: 4,
+            cols: 4,
+        };
+
+        assert_eq!(expected, lhs.quantize_lhs(&quantizer));
+    }
+
+    #[test]
+    fn quantize_rhs_odd_number_entries() {
+        let rhs: Matrix<f32> = Matrix {
             data: vec![
                 1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15.,
             ],
@@ -160,10 +189,38 @@ mod tests {
                 quantize_and_pack(&quantizer, 5., 10.),
                 quantize_and_pack(&quantizer, 15., 0.),
             ],
-            rows: 3,
-            cols: 5,
+            rows: 5,
+            cols: 3,
         };
 
-        assert_eq!(expected, Matrix::quantize_rhs(&lhs, &quantizer));
+        assert_eq!(expected, rhs.quantize_rhs(&quantizer));
+    }
+
+    #[test]
+    fn quantize_rhs_even_number_entries() {
+        let rhs: Matrix<f32> = Matrix {
+            data: vec![
+                1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16.,
+            ],
+            rows: 4,
+            cols: 4,
+        };
+        let quantizer = AffineQuantizer::new(1.0, 16.0);
+
+        let expected = Matrix {
+            data: vec![
+                quantize_and_pack(&quantizer, 1., 5.),
+                quantize_and_pack(&quantizer, 9., 13.),
+                quantize_and_pack(&quantizer, 2., 6.),
+                quantize_and_pack(&quantizer, 10., 14.),
+                quantize_and_pack(&quantizer, 3., 7.),
+                quantize_and_pack(&quantizer, 11., 15.),
+                quantize_and_pack(&quantizer, 4., 8.),
+                quantize_and_pack(&quantizer, 12., 16.),
+            ],
+            rows: 4,
+            cols: 4,
+        };
+        assert_eq!(expected, rhs.quantize_rhs(&quantizer));
     }
 }
