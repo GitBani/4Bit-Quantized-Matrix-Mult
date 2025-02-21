@@ -1,5 +1,3 @@
-use std::ops::{AddAssign, Mul};
-
 use crate::quantization::{quantize_and_pack, Quantizer4Bit};
 
 #[derive(PartialEq, Debug)]
@@ -12,7 +10,7 @@ pub struct Matrix<T> {
 // Todo maybe delete this all and make the multiplication a function on slices
 impl<T> Matrix<T>
 where
-    T: Copy + Default + AddAssign + Mul<Output = T>,
+    T: Copy + Default,
 {
     pub fn new(rows: usize, cols: usize) -> Self {
         Self {
@@ -41,21 +39,6 @@ where
 
         transposed
     }
-
-    pub fn naive_multiply(&self, other: &Matrix<T>) -> Matrix<T> {
-        let mut result = Matrix::<T>::new(self.rows, other.cols);
-
-        // for i in 0..self.rows {
-        //     for j in 0..other.cols {
-        //         for k in 0..self.cols {
-        //             let increment_by = self.get_element(i, k) * other.get_element(k, j);
-        //             result.increment_element(increment_by, i, j);
-        //         }
-        //     }
-        // }
-
-        result
-    }
 }
 
 impl Matrix<f32> {
@@ -82,32 +65,218 @@ impl Matrix<f32> {
     }
 }
 
+impl Matrix<u8> {
+    /// Multiply 4-bit quantized matrices using i32 accumulators, no output pipeline (returns matrix with accumulators directly)
+    /// self in row-major, other in column-major (this is processed by quantize_lhs and quantize_rhs)
+    pub fn naive_qmultiply(&self, other: &Self) -> Matrix<i32> {
+        let mut result = Vec::<i32>::with_capacity(self.rows * other.cols);
+        let mut lower_bits_lhs = true;
+        let mut lower_bits_rhs = true;
+
+        let mut i = 0;
+        while i < self.data.len() {
+            // Get next row from nibbles
+            let mut lhs_row = Vec::<u8>::with_capacity(self.cols);
+            for _ in 0..self.cols {
+                let next_val;
+                if lower_bits_lhs {
+                    next_val = self.data[i] & 0x0F
+                } else {
+                    next_val = self.data[i] >> 4;
+                    i += 1;
+                }
+                lower_bits_lhs = !lower_bits_lhs;
+                lhs_row.push(next_val);
+            }
+
+            let mut j = 0;
+            while j < other.data.len() {
+                // Get next col from nibbles
+                let mut rhs_col = Vec::<u8>::with_capacity(other.rows);
+                for _ in 0..other.rows {
+                    let next_val;
+                    if lower_bits_rhs {
+                        next_val = other.data[j] & 0x0F
+                    } else {
+                        next_val = other.data[j] >> 4;
+                        j += 1;
+                    }
+                    lower_bits_rhs = !lower_bits_rhs;
+                    rhs_col.push(next_val);
+                }
+
+                let mut dot_prod: i32 = 0;
+                for k in 0..self.cols {
+                    dot_prod += lhs_row[k] as i32 * rhs_col[k] as i32;
+                }
+                result.push(dot_prod);
+            }
+        }
+
+        Matrix {
+            data: result,
+            rows: self.rows,
+            cols: other.cols,
+        }
+    }
+
+    /// Multiply 4-bit quantized matrices using i32 accumulators, no output pipeline (returns matrix with accumulators directly)
+    /// self in row-major, other in column-major (this is processed by quantize_lhs and quantize_rhs)
+    /// This one tries allocating the row/col buffers once and for all, I'll see which of the 2 methods is faster
+    pub fn naive_qmultiply2(&self, other: &Self) -> Matrix<i32> {
+        let mut result = Vec::<i32>::with_capacity(self.rows * other.cols);
+        let mut lower_bits_lhs = true;
+        let mut lower_bits_rhs = true;
+
+        let mut lhs_row = Vec::<u8>::with_capacity(self.cols);
+        unsafe { lhs_row.set_len(self.cols) };
+        let mut rhs_col = Vec::<u8>::with_capacity(other.rows);
+        unsafe { rhs_col.set_len(other.rows) };
+
+        let mut i = 0;
+        while i < self.data.len() {
+            // Get next row from nibbles
+            for row_idx in 0..self.cols {
+                let next_val;
+                if lower_bits_lhs {
+                    next_val = self.data[i] & 0x0F
+                } else {
+                    next_val = self.data[i] >> 4;
+                    i += 1;
+                }
+                lower_bits_lhs = !lower_bits_lhs;
+                lhs_row[row_idx] = next_val;
+            }
+
+            let mut j = 0;
+            while j < other.data.len() {
+                // Get next col from nibbles
+                for col_idx in 0..other.rows {
+                    let next_val;
+                    if lower_bits_rhs {
+                        next_val = other.data[j] & 0x0F
+                    } else {
+                        next_val = other.data[j] >> 4;
+                        j += 1;
+                    }
+                    lower_bits_rhs = !lower_bits_rhs;
+                    rhs_col[col_idx] = next_val;
+                }
+
+                let mut dot_prod: i32 = 0;
+                for k in 0..self.cols {
+                    dot_prod += lhs_row[k] as i32 * rhs_col[k] as i32;
+                }
+                result.push(dot_prod);
+            }
+        }
+
+        Matrix {
+            data: result,
+            rows: self.rows,
+            cols: other.cols,
+        }
+    }
+
+    // Try to avoid memory allocations
+    // pub fn naive_qmultiply2(&self, other: &Self) -> Matrix<i32> {
+    //     let mut result = Vec::<i32>::new();
+    //     let mut lower_bits_lhs = true;
+    //     let mut lower_bits_rhs = true;
+
+    //     let depth_pairs = self.cols / 2;
+
+    //     let mut i = 0;
+    //     while i < self.data.len() {
+    //         let mut j = 0;
+    //         while j < other.data.len() {
+    //             let mut result_entry: i32 = 0;
+
+    //             // process highest even number <= depth, moving to the next byte each time
+    //             for k in 0..depth_pairs {
+    //                 let lhs_byte = self.data[i];
+    //                 let rhs_byte = other.data[j];
+
+    //                 let lhs_low = lhs_byte & 0x0F;
+    //                 let lhs_high = lhs_byte >> 4;
+    //                 let rhs_low = rhs_byte & 0x0F;
+    //                 let rhs_high = rhs_byte >> 4;
+
+    //                 result_entry += lhs_low as i32 * rhs_low as i32;
+    //                 result_entry += lhs_high as i32 * rhs_high as i32;
+
+    //                 i += 1;
+    //                 j += 1;
+    //             }
+
+    //             // if depth is odd, last element of the vectors is in the next nibble
+
+    //             result.push(dot_prod);
+    //         }
+    //     }
+
+    //     Matrix {
+    //         data: result,
+    //         rows: self.rows,
+    //         cols: other.cols,
+    //     }
+    // }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::quantization::affine_quantizer::AffineQuantizer;
 
     use super::*;
 
-    // #[test]
-    // fn naive_multiply() {
-    //     let a = Matrix {
-    //         data: vec![1, 2, 3, 4, 5, 6],
-    //         rows: 2,
-    //         cols: 3,
-    //     };
-    //     let b = Matrix {
-    //         data: vec![7, 8, 9, 10, 11, 12],
-    //         rows: 3,
-    //         cols: 2,
-    //     };
-    //     let c = Matrix {
-    //         data: vec![58, 64, 139, 154],
-    //         rows: 2,
-    //         cols: 2,
-    //     };
+    #[test]
+    fn naive_qmultiply_odd_depth() {
+        // Case 1
+        let a: Matrix<u8> = Matrix {
+            data: vec![(2 << 4) + 1, (4 << 4) + 3, (6 << 4) + 5],
+            rows: 2,
+            cols: 3,
+        };
+        let b: Matrix<u8> = Matrix {
+            data: vec![(8 << 4) + 7, (10 << 4) + 9, (12 << 4) + 11],
+            rows: 3,
+            cols: 2,
+        };
+        let c = Matrix {
+            data: vec![50, 68, 122, 167],
+            rows: 2,
+            cols: 2,
+        };
 
-    //     assert_eq!(a.naive_multiply(&b), c)
-    // }
+        assert_eq!(a.naive_qmultiply(&b), c);
+    }
+
+    #[test]
+    fn naive_qmultiply_even() {
+        let a: Matrix<u8> = Matrix {
+            data: vec![
+                (2 << 4) + 1,
+                (4 << 4) + 3,
+                (6 << 4) + 5,
+                (8 << 4) + 7,
+                (10 << 4) + 9,
+                (12 << 4) + 11,
+                (14 << 4) + 13,
+                (15 << 4) + 15,
+            ],
+            rows: 4,
+            cols: 4,
+        };
+        let c = Matrix {
+            data: vec![
+                30, 70, 110, 146, 70, 174, 278, 374, 110, 278, 446, 602, 146, 374, 602, 815,
+            ],
+            rows: 4,
+            cols: 4,
+        };
+
+        assert_eq!(a.naive_qmultiply(&a), c);
+    }
 
     #[test]
     fn quantize_lhs_odd_number_entries() {
