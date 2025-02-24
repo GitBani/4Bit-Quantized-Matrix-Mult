@@ -1,8 +1,19 @@
 [package]
-name = "four-bit-quantized-matrix-mult"
+name = "four_bit_quantized_matrix_mult"
 version = "0.1.0"
 edition = "2021"
+
+[lib]
+name = "four_bit_quantized_matrix_mult"
+path = "src/lib.rs"
 
 [dependencies]
 blas = "0.23.0"
 rand = "^0.9.0"
+
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "matrix_mult"
+harness = false

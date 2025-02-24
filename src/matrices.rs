@@ -1,10 +1,14 @@
+use std::ops::Range;
+
+use rand::Rng;
+
 use crate::quantization::{quantize_and_pack, Quantizer4Bit};
 
 #[derive(PartialEq, Debug)]
 pub struct Matrix<T> {
-    data: Vec<T>,
-    rows: usize,
-    cols: usize,
+    pub data: Vec<T>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
 // Todo maybe delete this all and make the multiplication a function on slices
@@ -63,67 +67,29 @@ impl Matrix<f32> {
             dst.data[i] = quantize_and_pack(quantizer, v1, v2)
         }
     }
+
+    pub fn random_square(dimension: usize, range: Range<f32>) -> Self {
+        let size = dimension * dimension;
+        let mut data = Vec::<f32>::with_capacity(size);
+
+        let mut rng = rand::rng();
+
+        for _ in 0..size {
+            data.push(rng.random_range(range.clone()));
+        }
+
+        Matrix {
+            data,
+            rows: dimension,
+            cols: dimension,
+        }
+    }
 }
 
 impl Matrix<u8> {
     /// Multiply 4-bit quantized matrices using i32 accumulators, no output pipeline (returns matrix with accumulators directly)
     /// self in row-major, other in column-major (this is processed by quantize_lhs and quantize_rhs)
     pub fn naive_qmultiply(&self, other: &Self) -> Matrix<i32> {
-        let mut result = Vec::<i32>::with_capacity(self.rows * other.cols);
-        let mut lower_bits_lhs = true;
-        let mut lower_bits_rhs = true;
-
-        let mut i = 0;
-        while i < self.data.len() {
-            // Get next row from nibbles
-            let mut lhs_row = Vec::<u8>::with_capacity(self.cols);
-            for _ in 0..self.cols {
-                let next_val;
-                if lower_bits_lhs {
-                    next_val = self.data[i] & 0x0F
-                } else {
-                    next_val = self.data[i] >> 4;
-                    i += 1;
-                }
-                lower_bits_lhs = !lower_bits_lhs;
-                lhs_row.push(next_val);
-            }
-
-            let mut j = 0;
-            while j < other.data.len() {
-                // Get next col from nibbles
-                let mut rhs_col = Vec::<u8>::with_capacity(other.rows);
-                for _ in 0..other.rows {
-                    let next_val;
-                    if lower_bits_rhs {
-                        next_val = other.data[j] & 0x0F
-                    } else {
-                        next_val = other.data[j] >> 4;
-                        j += 1;
-                    }
-                    lower_bits_rhs = !lower_bits_rhs;
-                    rhs_col.push(next_val);
-                }
-
-                let mut dot_prod: i32 = 0;
-                for k in 0..self.cols {
-                    dot_prod += lhs_row[k] as i32 * rhs_col[k] as i32;
-                }
-                result.push(dot_prod);
-            }
-        }
-
-        Matrix {
-            data: result,
-            rows: self.rows,
-            cols: other.cols,
-        }
-    }
-
-    /// Multiply 4-bit quantized matrices using i32 accumulators, no output pipeline (returns matrix with accumulators directly)
-    /// self in row-major, other in column-major (this is processed by quantize_lhs and quantize_rhs)
-    /// This one tries allocating the row/col buffers once and for all, I'll see which of the 2 methods is faster
-    pub fn naive_qmultiply2(&self, other: &Self) -> Matrix<i32> {
         let mut result = Vec::<i32>::with_capacity(self.rows * other.cols);
         let mut lower_bits_lhs = true;
         let mut lower_bits_rhs = true;
@@ -225,7 +191,7 @@ impl Matrix<u8> {
 
 #[cfg(test)]
 mod tests {
-    use crate::quantization::affine_quantizer::AffineQuantizer;
+    use crate::quantization::AffineQuantizer;
 
     use super::*;
 
