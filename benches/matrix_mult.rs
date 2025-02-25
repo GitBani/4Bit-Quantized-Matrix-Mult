@@ -13,7 +13,7 @@ fn matrix_mult_benchmark(c: &mut Criterion) {
     let fmax: f32 = 10.0;
     let quantizer = AffineQuantizer::new(fmin, fmax);
 
-    for i in (1..=20).filter(|x| x & 1 == 1) {
+    for i in 1..=20 {
         let fmm_lhs = Matrix::random_square(i, fmin..fmax);
         let fmm_rhs = Matrix::random_square(i, fmin..fmax);
         let mut fmm_result = Matrix::<f32>::new(i, i);
