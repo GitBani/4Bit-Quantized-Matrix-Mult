@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use four_bit_quantized_matrix_mult::{matrices::Matrix, quantization};
+use four_bit_quantized_matrix_mult::{
+    matrices::Matrix,
+    quantization::{self, quantize_multiplier},
+};
 use quantization::AffineQuantizer;
 
 fn matrix_mult_benchmark(c: &mut Criterion) {
@@ -9,40 +12,72 @@ fn matrix_mult_benchmark(c: &mut Criterion) {
     group.sample_size(10);
     group.warm_up_time(Duration::new(0, 1000));
 
-    let fmin: f32 = -10.0;
-    let fmax: f32 = 10.0;
-    let quantizer = AffineQuantizer::new(fmin, fmax);
+    let fmin: f32 = -1.0;
+    let fmax: f32 = 1.0;
 
-    for i in 1..=20 {
-        let fmm_lhs = Matrix::random_square(i, fmin..fmax);
-        let fmm_rhs = Matrix::random_square(i, fmin..fmax);
-        let mut fmm_result = Matrix::<f32>::new(i, i);
+    for i in 2..=20 {
+        let f_lhs = Matrix::random_square(i, fmin..fmax);
+        let f_rhs = Matrix::random_square(i, fmin..fmax);
+        let mut f_result = Matrix::<f32>::new(i, i);
 
-        let qmm_lhs = fmm_lhs.quantize_lhs(&quantizer);
-        let qmm_rhs = fmm_rhs.quantize_rhs(&quantizer);
-
-        group.bench_with_input(BenchmarkId::new("BLAS", i), &i, |b, &i| {
+        let size = i as i32;
+        group.bench_with_input(BenchmarkId::new("BLAS", i), &size, |b, &size| {
             b.iter(|| unsafe {
                 blas::sgemm(
                     b'N',
                     b'N',
-                    i as i32,
-                    i as i32,
-                    i as i32,
+                    size,
+                    size,
+                    size,
                     1.0,
-                    &fmm_rhs.data,
-                    i as i32,
-                    &fmm_lhs.data,
-                    i as i32,
+                    &f_rhs.data,
+                    size,
+                    &f_lhs.data,
+                    size,
                     1.0,
-                    &mut fmm_result.data,
-                    i as i32,
+                    &mut f_result.data,
+                    size,
                 );
             });
         });
 
+        let (lhs_min, lhs_max) = f_lhs.min_and_max();
+        let (rhs_min, rhs_max) = f_rhs.min_and_max();
+        let (result_min, result_max) = f_result.min_and_max();
+
+        // dbg!(&f_lhs, &f_rhs, &f_result);
+        // dbg!(result_min, result_max);
+        let lhs_quantizer = AffineQuantizer::new(lhs_min, lhs_max);
+        let rhs_quantizer = AffineQuantizer::new(rhs_min, rhs_max);
+        let result_quantizer = AffineQuantizer::new(result_min, result_max);
+
+        // dbg!(
+        //     lhs_quantizer.scale,
+        //     rhs_quantizer.scale,
+        //     result_quantizer.scale
+        // );
+
+        let q_lhs = f_lhs.quantize_lhs(&lhs_quantizer);
+        let q_rhs = f_rhs.quantize_rhs(&rhs_quantizer);
+
+        let lhs_offset = -(lhs_quantizer.zero as i32);
+        let rhs_offset = -(rhs_quantizer.zero as i32);
+        let result_offset = result_quantizer.zero as i32;
+
+        let real_multiplier = lhs_quantizer.scale * rhs_quantizer.scale / result_quantizer.scale;
+        let (q_multiplier, rshift) = quantize_multiplier(real_multiplier);
+
         group.bench_function(BenchmarkId::new("Quantized", i), |b| {
-            b.iter(|| qmm_lhs.naive_qmultiply(&qmm_rhs));
+            b.iter(|| {
+                q_lhs.naive_qmultiply(
+                    &q_rhs,
+                    lhs_offset,
+                    rhs_offset,
+                    result_offset,
+                    q_multiplier,
+                    rshift,
+                )
+            });
         });
     }
 }

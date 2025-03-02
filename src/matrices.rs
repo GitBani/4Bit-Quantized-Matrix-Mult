@@ -84,25 +84,118 @@ impl Matrix<f32> {
             cols: dimension,
         }
     }
+
+    pub fn min_and_max(&self) -> (f32, f32) {
+        (
+            *self
+                .data
+                .iter()
+                .min_by(|&a, &b| a.partial_cmp(b).unwrap())
+                .unwrap(),
+            *self
+                .data
+                .iter()
+                .max_by(|&a, &b| a.partial_cmp(b).unwrap())
+                .unwrap(),
+        )
+    }
+}
+
+impl Matrix<i32> {
+    pub fn dequantize(&self, quantizer: &impl Quantizer4Bit) -> Matrix<f32> {
+        Matrix {
+            data: self.data.iter().map(|&q| quantizer.dequantize(q)).collect(),
+            rows: self.rows,
+            cols: self.cols,
+        }
+    }
 }
 
 impl Matrix<u8> {
     /// Multiply 4-bit quantized matrices using i32 accumulators, no output pipeline (returns matrix with accumulators directly)
     /// self in row-major, other in column-major (this is processed by quantize_lhs and quantize_rhs)
-    pub fn naive_qmultiply(&self, other: &Self) -> Matrix<i32> {
+    ///
+    /// Optimization from gemmlowp:
+    ///
+    /// Let `P` denote the matrix shaped like `lhs`, but filled with 1's.
+
+    /// Let `Q` denote the matrix shaped like `rhs`, but filled with 1's.
+
+    /// Adding lhs_offset to each entry of `lhs`, means adding `lhs_offset * P` to
+    /// `lhs`.
+
+    /// Adding rhs_offset to each entry of `rhs`, means adding `rhs_offset * Q` to
+    /// `rhs`.
+
+    /// Thus, as far as handling `lhs_offset` and `rhs_offset` goes, the matrix product
+    /// to be computed is:
+
+    /// (lhs + lhs_offset * P) * (rhs + rhs_offset * Q)
+
+    /// Expanding this (using distributivity of matrix multiplication over addition), we
+    /// see that the above product is equal to the following sum of 4 terms:
+
+    /// lhs * rhs                                 (2)
+    /// + lhs_offset * P * rhs
+    /// + lhs * rhs_offset * Q
+    /// + lhs_offset * rhs_offset * P * Q
+
+    /// The first term, `lhs * rhs`, is just the matrix multiplication ignoring the
+    /// offsets, i.e. as if `lhs_offset==rhs_offset==0`. Our claim here is that this is
+    /// all what we have to compute in the GEMM kernel.
+
+    /// In the second term, `lhs_offset * P * rhs`, notice that since P is filled with
+    /// 1's, `P * rhs` has all its rows equal to each other, and equal to the row-vector
+    /// of sums of all the entries in each column of rhs.
+
+    /// Thus, we can compute the second term, `lhs_offset * P * rhs`, by summing each
+    /// column of rhs. This produces a single row-vector, and in order to add the second
+    /// term, we simply need to add this row-vector (multiplied by lhs_offset) to each
+    /// row of the result. This is just a rank one update of the result (equivalently,
+    /// the second term is a rank one matrix), and we can efficiently store it as a
+    /// single vector.
+
+    /// The third term, `lhs * rhs_offset * Q`, is entirely similar to the second one,
+    /// and can be similarly computed by summing each row of lhs, storing this in a
+    /// single column-vector, and later multiplying these sums by rhs_offset.
+
+    /// The fourth term is a single constant, repeated into all the entries of the
+    /// matrix. The matrix `P * Q` is filled with the single constant value 'depth' (the
+    /// depth of the matrix product i.e. the number of columns of the lhs). Thus the
+    /// fourth term is simply the rank zero update adding this constant to each matrix
+    /// entry:
+
+    /// lhs_offset * rhs_offset * depth
+    pub fn naive_qmultiply(
+        &self,
+        other: &Self,
+        lhs_offset: i32,
+        rhs_offset: i32,
+        result_offset: i32,
+        q_multiplier: i32,
+        rshift: i32,
+    ) -> Matrix<i32> {
         let mut result = Vec::<i32>::with_capacity(self.rows * other.cols);
 
+        // stores extracted nibbles
         let mut lhs_row = Vec::<u8>::with_capacity(self.cols);
         unsafe { lhs_row.set_len(self.cols) };
         let mut rhs_col = Vec::<u8>::with_capacity(other.rows);
         unsafe { rhs_col.set_len(other.rows) };
 
+        // to determine which nibble of byte to get
         let mut lower_bits_lhs = true;
 
+        // store vectors that are a part of the optimization trick for adding offsets described above
+        let mut rhs_offset_vec = Vec::with_capacity(self.cols);
+        let mut lhs_offset_vec = Vec::with_capacity(other.rows);
+
+        // only calculate lhs_offset_vec on first iteration
+        let mut first = true;
+
         let mut i = 0;
-        while i < self.data.len() - 1 {
+        for _ in 0..self.rows {
             // Get next row from nibbles
-            let mut lower_bits_rhs = true;
             for row_idx in 0..self.cols {
                 let next_val;
                 if lower_bits_lhs {
@@ -115,8 +208,11 @@ impl Matrix<u8> {
                 lhs_row[row_idx] = next_val;
             }
 
+            rhs_offset_vec.push(lhs_row.iter().map(|&x| x as i32).sum::<i32>() * rhs_offset);
+
             let mut j = 0;
-            while j < other.data.len() - 1 {
+            let mut lower_bits_rhs = true;
+            for _ in 0..other.cols {
                 // Get next col from nibbles
                 for col_idx in 0..other.rows {
                     let next_val;
@@ -130,11 +226,33 @@ impl Matrix<u8> {
                     rhs_col[col_idx] = next_val;
                 }
 
-                let mut dot_prod: i32 = 0;
-                for k in 0..self.cols {
-                    dot_prod += lhs_row[k] as i32 * rhs_col[k] as i32;
+                if first {
+                    lhs_offset_vec
+                        .push(rhs_col.iter().map(|&x| x as i32).sum::<i32>() * lhs_offset);
                 }
-                result.push(dot_prod);
+
+                let mut accumulator: i32 = 0;
+                for k in 0..self.cols {
+                    accumulator += lhs_row[k] as i32 * rhs_col[k] as i32;
+                }
+                result.push(accumulator);
+            }
+
+            first = false;
+        }
+
+        // add offsets and multiplier
+        let depth = self.cols as i32;
+        for i in 0..self.rows {
+            let row_start = i * other.cols;
+            for j in 0..other.cols {
+                let accumulator = result[row_start + j]
+                    + lhs_offset_vec[j]
+                    + rhs_offset_vec[i]
+                    + lhs_offset * rhs_offset * depth;
+
+                result[row_start + j] = result_offset
+                    + rounding_rshift(fixed_point_multiply(accumulator, q_multiplier), rshift);
             }
         }
 
@@ -146,6 +264,22 @@ impl Matrix<u8> {
     }
 }
 
+// #[inline]
+fn rounding_rshift(x: i32, rshift: i32) -> i32 {
+    if rshift == 0 {
+        return x;
+    };
+
+    let rounding_offset = 1 << (rshift - 1);
+    (x + rounding_offset) >> rshift
+}
+
+// #[inline]
+fn fixed_point_multiply(a: i32, b: i32) -> i32 {
+    let temp = a as i64 * b as i64 + (1_i64 << 30);
+    (temp >> 31) as i32
+}
+
 #[cfg(test)]
 mod tests {
     use crate::quantization::AffineQuantizer;
@@ -154,7 +288,6 @@ mod tests {
 
     #[test]
     fn naive_qmultiply_odd_depth() {
-        // Case 1
         let a: Matrix<u8> = Matrix {
             data: vec![(2 << 4) + 1, (4 << 4) + 3, (6 << 4) + 5],
             rows: 2,
@@ -171,7 +304,7 @@ mod tests {
             cols: 2,
         };
 
-        assert_eq!(a.naive_qmultiply(&b), c);
+        assert_eq!(a.naive_qmultiply(&b, 1, 1, 1, 1, 1), c);
     }
 
     #[test]
@@ -192,7 +325,7 @@ mod tests {
             cols: 3,
         };
 
-        assert_eq!(a.naive_qmultiply(&b), c);
+        assert_eq!(a.naive_qmultiply(&b, 1, 1, 1, 1, 1), c);
     }
 
     #[test]
@@ -219,7 +352,7 @@ mod tests {
             cols: 4,
         };
 
-        assert_eq!(a.naive_qmultiply(&a), c);
+        assert_eq!(a.naive_qmultiply(&a, 1, 1, 1, 1, 1), c);
     }
 
     #[test]

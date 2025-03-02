@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 blas = "0.23.0"
+plotters = "0.3.7"
 rand = "^0.9.0"
 
 [dev-dependencies]
