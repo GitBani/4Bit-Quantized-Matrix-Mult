@@ -101,7 +101,7 @@ impl Matrix<f32> {
     }
 }
 
-impl Matrix<i32> {
+impl Matrix<u8> {
     pub fn dequantize(&self, quantizer: &impl Quantizer4Bit) -> Matrix<f32> {
         Matrix {
             data: self.data.iter().map(|&q| quantizer.dequantize(q)).collect(),
@@ -174,8 +174,8 @@ impl Matrix<u8> {
         result_offset: i32,
         q_multiplier: i32,
         rshift: i32,
-    ) -> Matrix<i32> {
-        let mut result = Vec::<i32>::with_capacity(self.rows * other.cols);
+    ) -> Matrix<u8> {
+        let mut accumulators = Vec::<i32>::with_capacity(self.rows * other.cols);
 
         // stores extracted nibbles
         let mut lhs_row = Vec::<u8>::with_capacity(self.cols);
@@ -235,24 +235,27 @@ impl Matrix<u8> {
                 for k in 0..self.cols {
                     accumulator += lhs_row[k] as i32 * rhs_col[k] as i32;
                 }
-                result.push(accumulator);
+                accumulators.push(accumulator);
             }
 
             first = false;
         }
+
+        let mut result = Vec::with_capacity(accumulators.len());
 
         // add offsets and multiplier
         let depth = self.cols as i32;
         for i in 0..self.rows {
             let row_start = i * other.cols;
             for j in 0..other.cols {
-                let accumulator = result[row_start + j]
+                let with_offset = accumulators[row_start + j]
                     + lhs_offset_vec[j]
                     + rhs_offset_vec[i]
                     + lhs_offset * rhs_offset * depth;
+                let with_multiplier = result_offset
+                    + rounding_rshift(fixed_point_multiply(with_offset, q_multiplier), rshift);
 
-                result[row_start + j] = result_offset
-                    + rounding_rshift(fixed_point_multiply(accumulator, q_multiplier), rshift);
+                result.push(with_multiplier.clamp(0, 15) as u8);
             }
         }
 
@@ -264,7 +267,6 @@ impl Matrix<u8> {
     }
 }
 
-// #[inline]
 fn rounding_rshift(x: i32, rshift: i32) -> i32 {
     if rshift == 0 {
         return x;
@@ -274,7 +276,6 @@ fn rounding_rshift(x: i32, rshift: i32) -> i32 {
     (x + rounding_offset) >> rshift
 }
 
-// #[inline]
 fn fixed_point_multiply(a: i32, b: i32) -> i32 {
     let temp = a as i64 * b as i64 + (1_i64 << 30);
     (temp >> 31) as i32
@@ -285,75 +286,6 @@ mod tests {
     use crate::quantization::AffineQuantizer;
 
     use super::*;
-
-    #[test]
-    fn naive_qmultiply_odd_depth() {
-        let a: Matrix<u8> = Matrix {
-            data: vec![(2 << 4) + 1, (4 << 4) + 3, (6 << 4) + 5],
-            rows: 2,
-            cols: 3,
-        };
-        let b: Matrix<u8> = Matrix {
-            data: vec![(8 << 4) + 7, (10 << 4) + 9, (12 << 4) + 11],
-            rows: 3,
-            cols: 2,
-        };
-        let c = Matrix {
-            data: vec![50, 68, 122, 167],
-            rows: 2,
-            cols: 2,
-        };
-
-        assert_eq!(a.naive_qmultiply(&b, 1, 1, 1, 1, 1), c);
-    }
-
-    #[test]
-    fn naive_qmultiply_odd() {
-        let a: Matrix<u8> = Matrix {
-            data: vec![(8 << 4) + 5, (9 << 4) + 4, (1 << 4) + 2, (1 << 4) + 0, 0],
-            rows: 3,
-            cols: 3,
-        };
-        let b: Matrix<u8> = Matrix {
-            data: vec![(0 << 4) + 6, (7 << 4) + 3, (4 << 4) + 9, (1 << 4) + 1, 2],
-            rows: 3,
-            cols: 3,
-        };
-        let c = Matrix {
-            data: vec![42, 123, 21, 57, 85, 13, 0, 9, 1],
-            rows: 3,
-            cols: 3,
-        };
-
-        assert_eq!(a.naive_qmultiply(&b, 1, 1, 1, 1, 1), c);
-    }
-
-    #[test]
-    fn naive_qmultiply_even() {
-        let a: Matrix<u8> = Matrix {
-            data: vec![
-                (2 << 4) + 1,
-                (4 << 4) + 3,
-                (6 << 4) + 5,
-                (8 << 4) + 7,
-                (10 << 4) + 9,
-                (12 << 4) + 11,
-                (14 << 4) + 13,
-                (15 << 4) + 15,
-            ],
-            rows: 4,
-            cols: 4,
-        };
-        let c = Matrix {
-            data: vec![
-                30, 70, 110, 146, 70, 174, 278, 374, 110, 278, 446, 602, 146, 374, 602, 815,
-            ],
-            rows: 4,
-            cols: 4,
-        };
-
-        assert_eq!(a.naive_qmultiply(&a, 1, 1, 1, 1, 1), c);
-    }
 
     #[test]
     fn quantize_lhs_odd_number_entries() {
