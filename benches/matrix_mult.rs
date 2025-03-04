@@ -60,6 +60,19 @@ fn matrix_mult_benchmark(c: &mut Criterion) {
         let (q_multiplier, rshift) = quantize_multiplier(real_multiplier);
 
         group.bench_function(BenchmarkId::new("Quantized", i), |b| {
+            b.iter(|| {
+                q_lhs.naive_qmultiply(
+                    &q_rhs,
+                    lhs_offset,
+                    rhs_offset,
+                    result_offset,
+                    q_multiplier,
+                    rshift,
+                )
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("Quantized SIMD", i), |b| {
             b.iter(|| unsafe {
                 q_lhs.qmultiply(
                     &q_rhs,

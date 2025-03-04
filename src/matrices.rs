@@ -280,29 +280,11 @@ impl Matrix<u8> {
         let mut accumulators = vec![0; self.rows * other.cols];
         let mut result = Vec::with_capacity(accumulators.len());
 
-        // let rem = self.cols % 8;
         let blocked_depth = (self.cols / 8) * 8;
-
-        // let size = blocked_depth * mem::size_of::<i32>();
-        // let layout = Layout::from_size_align(size, 32).unwrap();
-        // let lhs_ptr = alloc(layout) as *mut i32;
-        // let rhs_ptr = alloc(layout) as *mut i32;
 
         // stores extracted nibbles
         let mut lhs_row = vec![0; self.cols];
         let mut rhs_col = vec![0; other.rows];
-        // let lhs_row = slice::from_raw_parts_mut(lhs_ptr, blocked_depth);
-        // for i in 0..blocked_depth {
-        //     lhs_row[i] = 0;
-        // }
-
-        // let rhs_col = slice::from_raw_parts_mut(rhs_ptr, blocked_depth);
-        // for i in 0..blocked_depth {
-        //     rhs_col[i] = 0;
-        // }
-
-        // let mut lhs_row_rem = vec![0; rem];
-        // let mut rhs_col_rem = vec![0; rem];
 
         // to determine which nibble of byte to get
         let mut lower_bits_lhs = true;
@@ -328,31 +310,7 @@ impl Matrix<u8> {
                 lower_bits_lhs = !lower_bits_lhs;
                 lhs_row[row_idx] = next_val as i32;
             }
-            // for row_idx in 0..blocked_depth {
-            //     let next_val;
-            //     if lower_bits_lhs {
-            //         next_val = self.data[lhs_nib_idx] & 0x0F
-            //     } else {
-            //         next_val = self.data[lhs_nib_idx] >> 4;
-            //         lhs_nib_idx += 1;
-            //     }
-            //     lower_bits_lhs = !lower_bits_lhs;
-            //     lhs_row[row_idx] = next_val as i32;
-            // }
-            // for row_idx in 0..rem {
-            //     let next_val;
-            //     if lower_bits_lhs {
-            //         next_val = self.data[lhs_nib_idx] & 0x0F
-            //     } else {
-            //         next_val = self.data[lhs_nib_idx] >> 4;
-            //         lhs_nib_idx += 1;
-            //     }
-            //     lower_bits_lhs = !lower_bits_lhs;
-            //     lhs_row_rem[row_idx] = next_val as i32;
-            // }
             rhs_offset_vec.push(lhs_row.iter().sum::<i32>() * rhs_offset);
-            // rhs_offset_vec
-            //     .push((lhs_row.iter().sum::<i32>() + lhs_row_rem.iter().sum::<i32>()) * rhs_offset);
 
             let mut rhs_nib_idx = 0;
             let mut lower_bits_rhs = true;
@@ -369,72 +327,28 @@ impl Matrix<u8> {
                     lower_bits_rhs = !lower_bits_rhs;
                     rhs_col[col_idx] = next_val as i32;
                 }
-                // for col_idx in 0..blocked_depth {
-                //     let next_val;
-                //     if lower_bits_rhs {
-                //         next_val = other.data[rhs_nib_idx] & 0x0F
-                //     } else {
-                //         next_val = other.data[rhs_nib_idx] >> 4;
-                //         rhs_nib_idx += 1;
-                //     }
-                //     lower_bits_rhs = !lower_bits_rhs;
-                //     rhs_col[col_idx] = next_val as i32;
-                // }
-                // for col_idx in 0..rem {
-                //     let next_val;
-                //     if lower_bits_rhs {
-                //         next_val = other.data[rhs_nib_idx] & 0x0F
-                //     } else {
-                //         next_val = other.data[rhs_nib_idx] >> 4;
-                //         rhs_nib_idx += 1;
-                //     }
-                //     lower_bits_rhs = !lower_bits_rhs;
-                //     rhs_col_rem[col_idx] = next_val as i32;
-                // }
                 if first {
                     lhs_offset_vec.push(rhs_col.iter().sum::<i32>() * lhs_offset);
-                    // lhs_offset_vec.push(
-                    //     (rhs_col.iter().sum::<i32>() + rhs_col_rem.iter().sum::<i32>())
-                    //         * lhs_offset,
-                    // );
                 }
 
                 let acc_idx = i * self.cols + j;
+                let mut vsum = _mm256_setzero_si256();
                 for k in (0..blocked_depth).step_by(8) {
                     let vlhs = _mm256_loadu_si256(lhs_row.as_ptr().add(k) as *const __m256i);
                     let vrhs = _mm256_loadu_si256(rhs_col.as_ptr().add(k) as *const __m256i);
-                    // let vlhs = _mm256_load_si256(lhs_row.as_ptr().add(k) as *const __m256i);
-                    // let vrhs = _mm256_load_si256(rhs_col.as_ptr().add(k) as *const __m256i);
-                    let prod = _mm256_mullo_epi32(vlhs, vrhs);
-                    // do the adding part of dot product
-                    // let vresult = _mm256_extract_epi32::<0>(prod)
-                    //     + _mm256_extract_epi32::<1>(prod)
-                    //     + _mm256_extract_epi32::<2>(prod)
-                    //     + _mm256_extract_epi32::<3>(prod)
-                    //     + _mm256_extract_epi32::<4>(prod)
-                    //     + _mm256_extract_epi32::<5>(prod)
-                    //     + _mm256_extract_epi32::<6>(prod)
-                    //     + _mm256_extract_epi32::<7>(prod);
-                    let vprod_high = _mm256_extracti128_si256::<1>(prod);
-                    let mut vresult = _mm_add_epi32(_mm256_castsi256_si128(prod), vprod_high);
-                    vresult = _mm_hadd_epi32(vresult, vresult);
-                    vresult = _mm_hadd_epi32(vresult, vresult);
-                    // accumulators[acc_idx] += vresult;
-                    accumulators[acc_idx] += _mm_cvtsi128_si32(vresult);
+                    let vprod = _mm256_mullo_epi32(vlhs, vrhs);
+                    vsum = _mm256_add_epi32(vsum, vprod);
                 }
+                accumulators[acc_idx] += hsum_avx2(vsum);
+
+                // handle remainder sequentially
                 for k in blocked_depth..self.cols {
                     accumulators[acc_idx] += lhs_row[k] * rhs_col[k];
                 }
-                // for k in 0..rem {
-                //     accumulators[acc_idx] += lhs_row_rem[k] * rhs_col_rem[k];
-                // }
             }
 
             first = false;
         }
-
-        // dealloc(lhs_ptr as *mut u8, layout);
-        // dealloc(rhs_ptr as *mut u8, layout);
 
         // add offsets and multiplier
         let depth = self.cols as i32;
@@ -458,6 +372,16 @@ impl Matrix<u8> {
             cols: other.cols,
         }
     }
+}
+
+#[inline]
+unsafe fn hsum_avx2(v: __m256i) -> i32 {
+    let vlow = _mm256_castsi256_si128(v);
+    let vhigh = _mm256_extracti128_si256(v, 1);
+    let vsum = _mm_add_epi32(vlow, vhigh);
+    let vsum = _mm_hadd_epi32(vsum, vsum);
+    let vsum = _mm_hadd_epi32(vsum, vsum);
+    _mm_cvtsi128_si32(vsum)
 }
 
 fn rounding_rshift(x: i32, rshift: i32) -> i32 {
