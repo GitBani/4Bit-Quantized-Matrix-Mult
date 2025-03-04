@@ -15,7 +15,7 @@ fn matrix_mult_benchmark(c: &mut Criterion) {
     let fmin: f32 = -1.0;
     let fmax: f32 = 1.0;
 
-    for i in 2..=20 {
+    for i in 8..=20 {
         let f_lhs = Matrix::random_square(i, fmin..fmax);
         let f_rhs = Matrix::random_square(i, fmin..fmax);
         let mut f_result = Matrix::<f32>::new(i, i);
@@ -45,17 +45,9 @@ fn matrix_mult_benchmark(c: &mut Criterion) {
         let (rhs_min, rhs_max) = f_rhs.min_and_max();
         let (result_min, result_max) = f_result.min_and_max();
 
-        // dbg!(&f_lhs, &f_rhs, &f_result);
-        // dbg!(result_min, result_max);
         let lhs_quantizer = AffineQuantizer::new(lhs_min, lhs_max);
         let rhs_quantizer = AffineQuantizer::new(rhs_min, rhs_max);
         let result_quantizer = AffineQuantizer::new(result_min, result_max);
-
-        // dbg!(
-        //     lhs_quantizer.scale,
-        //     rhs_quantizer.scale,
-        //     result_quantizer.scale
-        // );
 
         let q_lhs = f_lhs.quantize_lhs(&lhs_quantizer);
         let q_rhs = f_rhs.quantize_rhs(&rhs_quantizer);
@@ -68,8 +60,8 @@ fn matrix_mult_benchmark(c: &mut Criterion) {
         let (q_multiplier, rshift) = quantize_multiplier(real_multiplier);
 
         group.bench_function(BenchmarkId::new("Quantized", i), |b| {
-            b.iter(|| {
-                q_lhs.naive_qmultiply(
+            b.iter(|| unsafe {
+                q_lhs.qmultiply(
                     &q_rhs,
                     lhs_offset,
                     rhs_offset,
