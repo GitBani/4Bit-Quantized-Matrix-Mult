@@ -280,53 +280,43 @@ impl Matrix<u8> {
         let mut accumulators = vec![0; self.rows * other.cols];
         let mut result = Vec::with_capacity(accumulators.len());
 
-        let blocked_depth = (self.cols / 8) * 8;
+        let depth = self.cols;
+        let blocked_depth = (depth / 8) * 8;
 
         // stores extracted nibbles
         let mut lhs_row = vec![0; self.cols];
         let mut rhs_col = vec![0; other.rows];
 
-        // to determine which nibble of byte to get
-        let mut lower_bits_lhs = true;
-
         // store vectors that are a part of the optimization trick for adding offsets described above
         let mut rhs_offset_vec = Vec::with_capacity(self.cols);
         let mut lhs_offset_vec = Vec::with_capacity(other.rows);
 
+        // to determine which nibble of byte to get
+        let mut lower_bits_lhs = true;
         // only calculate lhs_offset_vec on first iteration
         let mut first = true;
 
         let mut lhs_nib_idx = 0;
         for i in 0..self.rows {
-            // Get next row from nibbles
-            for row_idx in 0..self.cols {
-                let next_val;
-                if lower_bits_lhs {
-                    next_val = self.data[lhs_nib_idx] & 0x0F
-                } else {
-                    next_val = self.data[lhs_nib_idx] >> 4;
-                    lhs_nib_idx += 1;
-                }
-                lower_bits_lhs = !lower_bits_lhs;
-                lhs_row[row_idx] = next_val as i32;
-            }
+            extract_nibbles_into_vec(
+                &self.data,
+                depth,
+                &mut lhs_nib_idx,
+                &mut lower_bits_lhs,
+                &mut lhs_row,
+            );
             rhs_offset_vec.push(lhs_row.iter().sum::<i32>() * rhs_offset);
 
             let mut rhs_nib_idx = 0;
             let mut lower_bits_rhs = true;
             for j in 0..other.cols {
-                // Get next col from nibbles
-                for col_idx in 0..other.rows {
-                    let next_val;
-                    if lower_bits_rhs {
-                        next_val = other.data[rhs_nib_idx] & 0x0F
-                    } else {
-                        next_val = other.data[rhs_nib_idx] >> 4;
-                        rhs_nib_idx += 1;
-                    }
-                    lower_bits_rhs = !lower_bits_rhs;
-                    rhs_col[col_idx] = next_val as i32;
-                }
+                extract_nibbles_into_vec(
+                    &other.data,
+                    depth,
+                    &mut rhs_nib_idx,
+                    &mut lower_bits_rhs,
+                    &mut rhs_col,
+                );
                 if first {
                     lhs_offset_vec.push(rhs_col.iter().sum::<i32>() * lhs_offset);
                 }
@@ -371,6 +361,26 @@ impl Matrix<u8> {
             rows: self.rows,
             cols: other.cols,
         }
+    }
+}
+
+fn extract_nibbles_into_vec(
+    data: &[u8],
+    count: usize,
+    nib_idx: &mut usize,
+    lower_bits: &mut bool,
+    dst: &mut [i32],
+) {
+    for row_idx in 0..count {
+        let next_val;
+        if *lower_bits {
+            next_val = data[*nib_idx] & 0x0F
+        } else {
+            next_val = data[*nib_idx] >> 4;
+            *nib_idx += 1;
+        }
+        *lower_bits = !*lower_bits;
+        dst[row_idx] = next_val as i32;
     }
 }
 
