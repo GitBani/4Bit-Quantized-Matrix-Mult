@@ -1,7 +1,5 @@
 use rand::Rng;
-use std::alloc::{alloc, dealloc, Layout};
 use std::ops::Range;
-use std::slice;
 use std::{arch::x86_64::*, mem};
 
 use crate::quantization::{quantize_and_pack, Quantizer4Bit};
