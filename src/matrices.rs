@@ -312,8 +312,7 @@ impl Matrix<u8> {
         // only calculate lhs_offset_vec on first iteration
         let mut first = true;
 
-        let mut row = 0;
-        for i in (0..self.data.len()).step_by(depth_bytes) {
+        for (row, i) in (0..self.data.len()).step_by(depth_bytes).enumerate() {
             extract_nibbles(
                 &self.data[i..i + depth_bytes],
                 blocked_depth_bytes,
@@ -326,8 +325,7 @@ impl Matrix<u8> {
                 + lhs_row.iter().sum::<i32>())
                 * rhs_offset;
 
-            let mut col = 0;
-            for j in (0..other.data.len()).step_by(depth_bytes) {
+            for (col, j) in (0..other.data.len()).step_by(depth_bytes).enumerate() {
                 extract_nibbles(
                     &other.data[j..j + depth_bytes],
                     blocked_depth_bytes,
@@ -355,12 +353,9 @@ impl Matrix<u8> {
                 for k in 0..extra {
                     accumulators[acc_idx] += lhs_row[k] * rhs_col[k];
                 }
-
-                col += 1;
             }
 
             first = false;
-            row += 1;
         }
 
         // add offsets and multiplier
