@@ -11,7 +11,6 @@ pub struct Matrix<T> {
     pub cols: usize,
 }
 
-// Todo maybe delete this all and make the multiplication a function on slices
 impl<T> Matrix<T>
 where
     T: Copy + Default,

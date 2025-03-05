@@ -44,7 +44,6 @@ pub fn quantize_multiplier(mut real_multiplier: f32) -> (i32, i32) {
 }
 
 /// 4 bit quantization scheme where quantized values range from 0 to 15
-/// todo make zero u8
 pub struct AffineQuantizer {
     pub scale: f32,
     pub zero: u8,
