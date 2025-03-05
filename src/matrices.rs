@@ -50,23 +50,32 @@ where
 impl Matrix<f32> {
     /// Quantize and pack values into a row-major matrix
     pub fn quantize_lhs(&self, quantizer: &impl Quantizer4Bit) -> Matrix<u8> {
-        let mut quantized_lhs = Matrix::<u8>::new_quantized(self.rows, self.cols);
-        Self::quantize(&self, &mut quantized_lhs, quantizer);
-        quantized_lhs
+        // let mut quantized_lhs = Matrix::<u8>::new_quantized(self.rows, self.cols);
+        Self::quantize(&self, self.rows, quantizer)
+        // quantized_lhs
     }
 
     /// Quantize and pack values into a column-major matrix
     pub fn quantize_rhs(&self, quantizer: &impl Quantizer4Bit) -> Matrix<u8> {
-        let mut quantized_rhs = Matrix::<u8>::new_quantized(self.cols, self.rows);
-        Self::quantize(&self.transpose(), &mut quantized_rhs, quantizer);
-        quantized_rhs
+        // let mut quantized_rhs = Matrix::<u8>::new_quantized(self.cols, self.rows);
+        Self::quantize(&self.transpose(), self.rows, quantizer)
+        // quantized_rhs
     }
 
-    fn quantize(matrix: &Self, dst: &mut Matrix<u8>, quantizer: &impl Quantizer4Bit) {
-        for (i, chunk) in matrix.data.chunks(2).enumerate() {
-            let v1 = chunk[0];
-            let v2 = chunk.get(1).copied().unwrap_or(0.0);
-            dst.data[i] = quantize_and_pack(quantizer, v1, v2)
+    fn quantize(matrix: &Self, size: usize, quantizer: &impl Quantizer4Bit) -> Matrix<u8> {
+        let mut data = vec![];
+        for vec in matrix.data.chunks(size) {
+            for to_pack in vec.chunks(2) {
+                let v1 = to_pack[0];
+                let v2 = to_pack.get(1).copied().unwrap_or(0.0);
+                data.push(quantize_and_pack(quantizer, v1, v2));
+            }
+        }
+
+        Matrix {
+            data,
+            rows: matrix.rows,
+            cols: matrix.cols,
         }
     }
 
@@ -281,63 +290,77 @@ impl Matrix<u8> {
         let mut result = Vec::with_capacity(accumulators.len());
 
         let depth = self.cols;
-        let blocked_depth = (depth / 8) * 8;
+        let blocks = depth / 8;
+        let blocked_depth = blocks * 8;
+        let extra = depth - blocked_depth;
+        let blocked_depth_bytes = blocks * 4;
+        let depth_bytes = (depth + 1) / 2;
+
+        let mut lhs_row_regs = vec![mem::zeroed(); blocks];
+        let mut rhs_col_regs = vec![mem::zeroed(); blocks];
 
         // stores extracted nibbles
-        let mut lhs_row = vec![0; self.cols];
-        let mut rhs_col = vec![0; other.rows];
+        // plus one: if row/col is odd, then the last nibble will be in lower nibble, meaning higher nibble (0) will be stored here too
+        // the kernel skips this +1 element
+        let mut lhs_row = vec![0; extra + 1];
+        let mut rhs_col = vec![0; extra + 1];
 
         // store vectors that are a part of the optimization trick for adding offsets described above
-        let mut rhs_offset_vec = Vec::with_capacity(self.cols);
-        let mut lhs_offset_vec = Vec::with_capacity(other.rows);
+        let mut rhs_offset_vec = vec![0; self.cols];
+        let mut lhs_offset_vec = vec![0; other.rows];
 
-        // to determine which nibble of byte to get
-        let mut lower_bits_lhs = true;
         // only calculate lhs_offset_vec on first iteration
         let mut first = true;
 
-        let mut lhs_nib_idx = 0;
-        for i in 0..self.rows {
-            extract_nibbles_into_vec(
-                &self.data,
-                depth,
-                &mut lhs_nib_idx,
-                &mut lower_bits_lhs,
+        let mut row = 0;
+        for i in (0..self.data.len()).step_by(depth_bytes) {
+            extract_nibbles(
+                &self.data[i..i + depth_bytes],
+                blocked_depth_bytes,
+                depth_bytes,
+                &mut lhs_row_regs,
                 &mut lhs_row,
             );
-            rhs_offset_vec.push(lhs_row.iter().sum::<i32>() * rhs_offset);
 
-            let mut rhs_nib_idx = 0;
-            let mut lower_bits_rhs = true;
-            for j in 0..other.cols {
-                extract_nibbles_into_vec(
-                    &other.data,
-                    depth,
-                    &mut rhs_nib_idx,
-                    &mut lower_bits_rhs,
+            rhs_offset_vec[row] = (lhs_row_regs.iter().map(|&v| hsum_avx2(v)).sum::<i32>()
+                + lhs_row.iter().sum::<i32>())
+                * rhs_offset;
+
+            let mut col = 0;
+            for j in (0..other.data.len()).step_by(depth_bytes) {
+                extract_nibbles(
+                    &other.data[j..j + depth_bytes],
+                    blocked_depth_bytes,
+                    depth_bytes,
+                    &mut rhs_col_regs,
                     &mut rhs_col,
                 );
                 if first {
-                    lhs_offset_vec.push(rhs_col.iter().sum::<i32>() * lhs_offset);
+                    lhs_offset_vec[col] = (rhs_col_regs.iter().map(|&v| hsum_avx2(v)).sum::<i32>()
+                        + rhs_col.iter().sum::<i32>())
+                        * lhs_offset;
                 }
 
-                let acc_idx = i * self.cols + j;
+                let acc_idx = row * self.cols + col;
                 let mut vsum = _mm256_setzero_si256();
-                for k in (0..blocked_depth).step_by(8) {
-                    let vlhs = _mm256_loadu_si256(lhs_row.as_ptr().add(k) as *const __m256i);
-                    let vrhs = _mm256_loadu_si256(rhs_col.as_ptr().add(k) as *const __m256i);
+                for k in 0..blocks {
+                    let vlhs = lhs_row_regs[k];
+                    let vrhs = rhs_col_regs[k];
                     let vprod = _mm256_mullo_epi32(vlhs, vrhs);
                     vsum = _mm256_add_epi32(vsum, vprod);
                 }
                 accumulators[acc_idx] += hsum_avx2(vsum);
 
                 // handle remainder sequentially
-                for k in blocked_depth..self.cols {
+                for k in 0..extra {
                     accumulators[acc_idx] += lhs_row[k] * rhs_col[k];
                 }
+
+                col += 1;
             }
 
             first = false;
+            row += 1;
         }
 
         // add offsets and multiplier
@@ -364,34 +387,50 @@ impl Matrix<u8> {
     }
 }
 
-fn extract_nibbles_into_vec(
+// blocked_count must be a multiple of 8
+unsafe fn extract_nibbles(
     data: &[u8],
-    count: usize,
-    nib_idx: &mut usize,
-    lower_bits: &mut bool,
-    dst: &mut [i32],
+    blocked_count: usize,
+    total_count: usize,
+    regs_dst: &mut [__m256i],
+    extras_dst: &mut [i32],
 ) {
-    for row_idx in 0..count {
-        let next_val;
-        if *lower_bits {
-            next_val = data[*nib_idx] & 0x0F
-        } else {
-            next_val = data[*nib_idx] >> 4;
-            *nib_idx += 1;
-        }
-        *lower_bits = !*lower_bits;
-        dst[row_idx] = next_val as i32;
+    // nibbles packed into m256i's
+    let mut blocks = data.chunks_exact(4);
+    for (i, _) in (0..blocked_count).step_by(4).enumerate() {
+        let block = blocks.next().unwrap();
+        let bytes = _mm_set_epi32(
+            block[0] as i32,
+            block[1] as i32,
+            block[2] as i32,
+            block[3] as i32,
+        );
+        let lower_nibbles = _mm_and_si128(bytes, _mm_set1_epi8(0x0F));
+        let upper_nibbles = _mm_srli_epi32(bytes, 4);
+
+        let unpacked_lo = _mm_unpacklo_epi32(lower_nibbles, upper_nibbles);
+        let unpacked_hi = _mm_unpackhi_epi32(lower_nibbles, upper_nibbles);
+
+        let mut appended = _mm256_castsi128_si256(unpacked_lo);
+        appended = _mm256_insertf128_si256(appended, unpacked_hi, 1);
+
+        regs_dst[i] = appended;
+    }
+    // extras go in i32 vector
+    for (i, data_idx) in (blocked_count..total_count).enumerate() {
+        let byte = data[data_idx];
+        let lo = byte & 0x0F;
+        let hi = byte >> 4;
+        extras_dst[i] = lo as i32;
+        extras_dst[i + 1] = hi as i32;
     }
 }
 
 #[inline]
 unsafe fn hsum_avx2(v: __m256i) -> i32 {
-    let vlow = _mm256_castsi256_si128(v);
-    let vhigh = _mm256_extracti128_si256(v, 1);
-    let vsum = _mm_add_epi32(vlow, vhigh);
-    let vsum = _mm_hadd_epi32(vsum, vsum);
-    let vsum = _mm_hadd_epi32(vsum, vsum);
-    _mm_cvtsi128_si32(vsum)
+    let sum = _mm256_hadd_epi32(v, v);
+    let sum = _mm256_hadd_epi32(sum, sum);
+    _mm256_extract_epi32(sum, 0) + _mm256_extract_epi32(sum, 4)
 }
 
 fn rounding_rshift(x: i32, rshift: i32) -> i32 {
@@ -428,11 +467,13 @@ mod tests {
         let expected = Matrix {
             data: vec![
                 quantize_and_pack(&quantizer, 1., 2.),
-                quantize_and_pack(&quantizer, 3., 4.),
-                quantize_and_pack(&quantizer, 5., 6.),
+                quantize_and_pack(&quantizer, 3., 0.),
+                quantize_and_pack(&quantizer, 4., 5.),
+                quantize_and_pack(&quantizer, 6., 0.),
                 quantize_and_pack(&quantizer, 7., 8.),
-                quantize_and_pack(&quantizer, 9., 10.),
-                quantize_and_pack(&quantizer, 11., 12.),
+                quantize_and_pack(&quantizer, 9., 0.),
+                quantize_and_pack(&quantizer, 10., 11.),
+                quantize_and_pack(&quantizer, 12., 0.),
                 quantize_and_pack(&quantizer, 13., 14.),
                 quantize_and_pack(&quantizer, 15., 0.),
             ],
@@ -486,11 +527,13 @@ mod tests {
         let expected = Matrix {
             data: vec![
                 quantize_and_pack(&quantizer, 1., 6.),
-                quantize_and_pack(&quantizer, 11., 2.),
-                quantize_and_pack(&quantizer, 7., 12.),
+                quantize_and_pack(&quantizer, 11., 0.),
+                quantize_and_pack(&quantizer, 2., 7.),
+                quantize_and_pack(&quantizer, 12., 0.),
                 quantize_and_pack(&quantizer, 3., 8.),
-                quantize_and_pack(&quantizer, 13., 4.),
-                quantize_and_pack(&quantizer, 9., 14.),
+                quantize_and_pack(&quantizer, 13., 0.),
+                quantize_and_pack(&quantizer, 4., 9.),
+                quantize_and_pack(&quantizer, 14., 0.),
                 quantize_and_pack(&quantizer, 5., 10.),
                 quantize_and_pack(&quantizer, 15., 0.),
             ],
