@@ -163,7 +163,7 @@ fn mse_as_range_increases(max_real_value: i32) -> Vec<(f32, f32)> {
 
             let q_result = unsafe {
                 q_lhs
-                    .qmultiply(
+                    .qmultiply_simd(
                         &q_rhs,
                         lhs_offset,
                         rhs_offset,
@@ -190,7 +190,7 @@ fn mse_as_size_increases(max_dimension: usize) -> Vec<(f32, f32)> {
 
     let iterations_per_range = 100;
 
-    for dimension in 1..=max_dimension {
+    for dimension in 2..=max_dimension {
         let mut sum = 0.0;
 
         for _ in 0..iterations_per_range {
@@ -238,7 +238,7 @@ fn mse_as_size_increases(max_dimension: usize) -> Vec<(f32, f32)> {
 
             let q_result = unsafe {
                 q_lhs
-                    .qmultiply(
+                    .qmultiply_simd(
                         &q_rhs,
                         lhs_offset,
                         rhs_offset,

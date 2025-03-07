@@ -23,14 +23,6 @@ where
         }
     }
 
-    pub fn new_quantized<Q: Copy + Default>(rows: usize, cols: usize) -> Matrix<Q> {
-        Matrix {
-            data: vec![Q::default(); (rows * cols + 1) / 2],
-            rows,
-            cols,
-        }
-    }
-
     pub fn transpose(&self) -> Self {
         let mut transposed = Matrix::new(self.cols, self.rows);
 
@@ -47,21 +39,20 @@ where
 impl Matrix<f32> {
     /// Quantize and pack values into a row-major matrix
     pub fn quantize_lhs(&self, quantizer: &impl Quantizer4Bit) -> Matrix<u8> {
-        // let mut quantized_lhs = Matrix::<u8>::new_quantized(self.rows, self.cols);
         Self::quantize(&self, self.rows, quantizer)
-        // quantized_lhs
     }
 
     /// Quantize and pack values into a column-major matrix
     pub fn quantize_rhs(&self, quantizer: &impl Quantizer4Bit) -> Matrix<u8> {
-        // let mut quantized_rhs = Matrix::<u8>::new_quantized(self.cols, self.rows);
         Self::quantize(&self.transpose(), self.rows, quantizer)
-        // quantized_rhs
     }
 
-    fn quantize(matrix: &Self, size: usize, quantizer: &impl Quantizer4Bit) -> Matrix<u8> {
+    fn quantize(matrix: &Self, dimension: usize, quantizer: &impl Quantizer4Bit) -> Matrix<u8> {
         let mut data = vec![];
-        for vec in matrix.data.chunks(size) {
+        // for each row/col
+        for vec in matrix.data.chunks(dimension) {
+            // group in pairs, and if odd pad with 0
+            // this ensures that rows/cols boundaries are not in the middle of a byte
             for to_pack in vec.chunks(2) {
                 let v1 = to_pack[0];
                 let v2 = to_pack.get(1).copied().unwrap_or(0.0);
@@ -117,9 +108,58 @@ impl Matrix<u8> {
             cols: self.cols,
         }
     }
-}
 
-impl Matrix<u8> {
+    pub fn random_sparse_quantized_square(dimension: usize) -> Self {
+        let mut data = vec![];
+        let mut rng = rand::rng();
+
+        if dimension == 1 {
+            if rng.random::<f32>() > 0.67 {
+                data.push(rng.random_range(0_u8..15_u8));
+            } else {
+                data.push(0);
+            }
+
+            return Matrix {
+                data,
+                rows: dimension,
+                cols: dimension,
+            };
+        }
+
+        let odd = (dimension & 1) == 1;
+
+        // for each row
+        for _ in 0..dimension {
+            // for each pair in row
+            for _ in (0..(dimension + 1) / 2).step_by(2) {
+                if rng.random::<f32>() > 0.67 {
+                    let nibble1 = rng.random_range(0_u8..15_u8);
+                    let nibble2 = rng.random_range(0_u8..15_u8);
+                    let packed = (nibble2 << 4) + nibble1;
+                    data.push(packed);
+                } else {
+                    data.push(0);
+                }
+            }
+
+            // last in odd row is padded with a 0
+            if odd {
+                if rng.random::<f32>() > 0.67 {
+                    data.push(rng.random_range(0_u8..15_u8));
+                } else {
+                    data.push(0);
+                }
+            }
+        }
+
+        Matrix {
+            data,
+            rows: dimension,
+            cols: dimension,
+        }
+    }
+
     /// Multiply 4-bit quantized matrices using i32 accumulators, no output pipeline (returns matrix with accumulators directly)
     /// self in row-major, other in column-major (this is processed by quantize_lhs and quantize_rhs)
     ///
@@ -174,7 +214,7 @@ impl Matrix<u8> {
     /// entry:
 
     /// lhs_offset * rhs_offset * depth
-    pub fn naive_qmultiply(
+    pub fn qmultiply(
         &self,
         other: &Self,
         lhs_offset: i32,
@@ -274,7 +314,7 @@ impl Matrix<u8> {
         }
     }
 
-    pub unsafe fn qmultiply(
+    pub unsafe fn qmultiply_simd(
         &self,
         other: &Self,
         lhs_offset: i32,
@@ -377,6 +417,42 @@ impl Matrix<u8> {
             cols: other.cols,
         }
     }
+
+    pub unsafe fn qmultiply_simd_fp(
+        &self,
+        other: &Self,
+        lhs_offset: i32,
+        rhs_offset: i32,
+        result_offset: i32,
+        q_multiplier: i32,
+        rshift: i32,
+    ) -> Matrix<u8> {
+        let depth = self.cols;
+        let blocks = depth / 8;
+        let blocked_depth = blocks * 8;
+        let extra = depth - blocked_depth;
+        let blocked_depth_bytes = blocks * 4;
+        let depth_bytes = (depth + 1) / 2;
+
+        let lhs_rows = self.data.chunks(depth_bytes).map(|row_bytes| {
+            extract_nibbles_into_regs(row_bytes, blocked_depth_bytes, depth_bytes)
+        });
+        let rhs_cols = other.data.chunks(depth_bytes).map(|col_bytes| {
+            extract_nibbles_into_regs(col_bytes, blocked_depth_bytes, depth_bytes)
+        });
+
+        dbg!(depth, blocked_depth, blocked_depth_bytes, depth_bytes);
+        dbg!(lhs_rows.len());
+        dbg!(rhs_cols.len());
+
+        // let zipped = lhs_rows.cycle().take(lhs_rows.len() * )
+
+        Matrix {
+            data: vec![],
+            rows: 0,
+            cols: 0,
+        }
+    }
 }
 
 // blocked_count must be a multiple of 8
@@ -418,6 +494,44 @@ unsafe fn extract_nibbles(
     }
 }
 
+// blocked_count must be a multiple of 8
+unsafe fn extract_nibbles_into_regs(
+    data: &[u8],
+    blocked_count: usize,
+    total_count: usize,
+) -> (
+    impl Iterator<Item = __m256i> + '_,
+    impl Iterator<Item = i32> + '_,
+) {
+    // nibbles packed into m256i's
+    let mut blocks = data.chunks_exact(4);
+    let regs = (0..blocked_count).step_by(4).map(move |_| {
+        let block = blocks.next().unwrap();
+        let bytes = _mm_set_epi32(
+            block[0] as i32,
+            block[1] as i32,
+            block[2] as i32,
+            block[3] as i32,
+        );
+        let lower_nibbles = _mm_and_si128(bytes, _mm_set1_epi8(0x0F));
+        let upper_nibbles = _mm_srli_epi32(bytes, 4);
+
+        let unpacked_lo = _mm_unpacklo_epi32(lower_nibbles, upper_nibbles);
+        let unpacked_hi = _mm_unpackhi_epi32(lower_nibbles, upper_nibbles);
+
+        let appended = _mm256_castsi128_si256(unpacked_lo);
+        _mm256_insertf128_si256(appended, unpacked_hi, 1)
+    });
+    let extras = (blocked_count..total_count).flat_map(|data_idx| {
+        let byte = data[data_idx];
+        let lo = byte & 0x0F;
+        let hi = byte >> 4;
+        [lo as i32, hi as i32]
+    });
+
+    (regs, extras)
+}
+
 #[inline]
 unsafe fn hsum_avx2(v: __m256i) -> i32 {
     let sum = _mm256_hadd_epi32(v, v);
@@ -437,6 +551,81 @@ fn rounding_rshift(x: i32, rshift: i32) -> i32 {
 fn fixed_point_multiply(a: i32, b: i32) -> i32 {
     let temp = a as i64 * b as i64 + (1_i64 << 30);
     (temp >> 31) as i32
+}
+
+#[derive(PartialEq, Debug)]
+pub struct QCsrMatrix<T> {
+    pub data: Vec<T>,
+    pub col_index: Vec<usize>,
+    pub row_index: Vec<usize>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+impl QCsrMatrix<u8> {
+    // Convert *quantized* matrix into CSR representation
+    pub fn from(qm: &Matrix<u8>) -> Self {
+        // quantized matrices are packed
+        let qrowsize = (qm.cols + 1) / 2;
+
+        let mut data = vec![];
+        let mut col_index = vec![];
+        let mut row_index = vec![0];
+
+        let mut r_idx = 0;
+        for row in qm.data.chunks(qrowsize) {
+            for (c_idx, &element) in row.iter().enumerate() {
+                if element == 0 {
+                    continue;
+                }
+
+                data.push(element);
+                col_index.push(c_idx * 2); // becuase elements are packed
+                r_idx += 1;
+            }
+            row_index.push(r_idx);
+        }
+
+        if data.len() == 0 {
+            row_index = vec![];
+        }
+
+        QCsrMatrix {
+            data,
+            col_index,
+            row_index,
+            rows: qm.rows,
+            cols: qm.cols,
+        }
+    }
+
+    pub fn csr_qmultiply(&self, other: &QCscMatrix<u8>) {
+        // enumerate, take, for each vec mul and add if col/row indices are the same
+    }
+}
+
+#[derive(PartialEq, Debug)]
+pub struct QCscMatrix<T> {
+    pub data: Vec<T>,
+    pub row_index: Vec<usize>,
+    pub col_index: Vec<usize>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+impl QCscMatrix<u8> {
+    // Convert a *quantized* matrix in *column-major order* to CSC representation
+    pub fn from(m: &Matrix<u8>) -> Self {
+        let csr_from_transpose = QCsrMatrix::from(&m);
+        QCscMatrix {
+            data: csr_from_transpose.data,
+            // flip row and col index vectors (function expects row-major and generates CSR, this is col-major thus ends up in CSC)
+            row_index: csr_from_transpose.col_index,
+            col_index: csr_from_transpose.row_index,
+            rows: csr_from_transpose.rows,
+            cols: csr_from_transpose.cols,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -562,5 +751,53 @@ mod tests {
             cols: 4,
         };
         assert_eq!(expected, rhs.quantize_rhs(&quantizer));
+    }
+
+    #[test]
+    fn test() {
+        let rhs = Matrix::random_sparse_quantized_square(21);
+        let lhs = Matrix::random_sparse_quantized_square(21);
+        _ = unsafe { lhs.qmultiply_simd_fp(&rhs, 0, 0, 0, 0, 0) };
+    }
+    // todo make this actual tests
+    #[test]
+    fn test_csr() {
+        let d = 4;
+        let qm = Matrix::random_sparse_quantized_square(d);
+        let csr = QCsrMatrix::from(&qm);
+        let csc = QCscMatrix::from(&qm);
+        qm.data.chunks((d + 1) / 2).for_each(|x| {
+            println!("{x:?}");
+        });
+        dbg!(&csr);
+        dbg!(&csc);
+
+        // let m = Matrix {
+        //     data: vec![5, 0, 0, 0, 0, 8, 0, 0, 0, 0, 3, 0, 0, 6, 0, 0],
+        //     rows: 4,
+        //     cols: 4,
+        // };
+        // let csr = CsrMatrix::from(&m);
+        // dbg!(&csr);
+
+        // let m = Matrix {
+        //     data: vec![0; 16],
+        //     rows: 4,
+        //     cols: 4,
+        // };
+        // let csr = CsrMatrix::from(&m);
+
+        // dbg!(&csr);
+    }
+
+    #[test]
+    fn test_csc() {
+        let m = Matrix {
+            data: vec![1, 0, 2, 0, 0, 3, 4, 5, 6],
+            rows: 3,
+            cols: 3,
+        };
+        let csc = QCscMatrix::from(&m);
+        dbg!(&csc);
     }
 }

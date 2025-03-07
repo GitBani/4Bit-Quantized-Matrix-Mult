@@ -9,13 +9,13 @@ use quantization::AffineQuantizer;
 
 fn matrix_mult_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("MatrixMult");
-    group.sample_size(10);
-    group.warm_up_time(Duration::new(0, 1000));
+    // group.sample_size(10);
+    // group.warm_up_time(Duration::new(0, 1000));
 
     let fmin: f32 = -1.0;
     let fmax: f32 = 1.0;
 
-    for i in 8..=20 {
+    for i in 2..=1000 {
         let f_lhs = Matrix::random_square(i, fmin..fmax);
         let f_rhs = Matrix::random_square(i, fmin..fmax);
         let mut f_result = Matrix::<f32>::new(i, i);
@@ -59,22 +59,22 @@ fn matrix_mult_benchmark(c: &mut Criterion) {
         let real_multiplier = lhs_quantizer.scale * rhs_quantizer.scale / result_quantizer.scale;
         let (q_multiplier, rshift) = quantize_multiplier(real_multiplier);
 
-        // group.bench_function(BenchmarkId::new("Quantized", i), |b| {
-        //     b.iter(|| {
-        //         q_lhs.naive_qmultiply(
-        //             &q_rhs,
-        //             lhs_offset,
-        //             rhs_offset,
-        //             result_offset,
-        //             q_multiplier,
-        //             rshift,
-        //         )
-        //     });
-        // });
+        group.bench_function(BenchmarkId::new("Quantized", i), |b| {
+            b.iter(|| {
+                q_lhs.qmultiply(
+                    &q_rhs,
+                    lhs_offset,
+                    rhs_offset,
+                    result_offset,
+                    q_multiplier,
+                    rshift,
+                )
+            });
+        });
 
         group.bench_function(BenchmarkId::new("Quantized SIMD", i), |b| {
             b.iter(|| unsafe {
-                q_lhs.qmultiply(
+                q_lhs.qmultiply_simd(
                     &q_rhs,
                     lhs_offset,
                     rhs_offset,
