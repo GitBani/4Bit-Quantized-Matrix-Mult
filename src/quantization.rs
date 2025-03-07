@@ -53,7 +53,7 @@ impl AffineQuantizer {
     pub fn new(min_val: f32, max_val: f32) -> Self {
         let min_val = min_val - 1e-6;
         let max_val = max_val + 1e-6;
-        let scale = (max_val - min_val) / 15.0;
+        let scale = (max_val - min_val) / 15.0; // 4-bit range
         let zero = (-min_val / scale).round().clamp(0., 15.) as u8;
         AffineQuantizer { scale, zero }
     }
@@ -68,5 +68,28 @@ impl Quantizer4Bit for AffineQuantizer {
 
     fn dequantize(&self, q_val: u8) -> f32 {
         self.scale * (q_val as f32 - self.zero as f32)
+    }
+}
+
+pub struct LogQuantizer {
+    pub scale: f32,
+}
+
+impl LogQuantizer {
+    pub fn new(min_val: f32, max_val: f32) -> Self {
+        let min_val = min_val - 1e-6;
+        let max_val = max_val + 1e-6;
+        let scale = (max_val.log2() - min_val.log2()) / 15.0; // 4-bit range
+        LogQuantizer { scale }
+    }
+}
+
+impl Quantizer4Bit for LogQuantizer {
+    fn quantize(&self, real_val: f32) -> u8 {
+        (real_val.log2() / self.scale).clamp(0., 15.).round() as u8
+    }
+
+    fn dequantize(&self, q_val: u8) -> f32 {
+        2.0f32.powf(q_val as f32 * self.scale)
     }
 }
