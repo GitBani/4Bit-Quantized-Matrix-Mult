@@ -1,5 +1,5 @@
 # 4-Bit Quantized Matrix Multiplication
-In this lab, I explore 4-bit quantized matrix multiplication, using FP32 matrix multiplication as the baseline.
+In this lab, I explore 4-bit quantized matrix multiplication, using BLAS' FP32 matrix multiplication as the baseline.
 
 ## 4-Bit Affine Quantization
 Affine quantization maps float values $x\in [x_{\min},\ x_{\max}]$ to some $q\in [q_{\min},\ q_{\max}]$ by the following scheme:
