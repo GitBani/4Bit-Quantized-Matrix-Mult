@@ -51,47 +51,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ==========================================================================================================================================
     // As size increases
-    // let mse = mse_as_size_increases(50);
-    // let root = BitMapBackend::new("mse-size.png", (800, 600)).into_drawing_area();
-    // root.fill(&WHITE)?;
+    let mse = mse_as_size_increases(50);
+    let root = BitMapBackend::new("mse-size.png", (800, 600)).into_drawing_area();
+    root.fill(&WHITE)?;
 
-    // let (x_min, x_max) = (
-    //     mse.first().map(|(x, _)| *x).unwrap_or(1.0),
-    //     mse.last().map(|(x, _)| *x).unwrap_or(100.0),
-    // );
-    // let y_max = mse.iter().map(|(_, y)| *y).fold(0.0, f32::max) * 1.1; // Add 10% padding
+    let (x_min, x_max) = (
+        mse.first().map(|(x, _)| *x).unwrap_or(1.0),
+        mse.last().map(|(x, _)| *x).unwrap_or(100.0),
+    );
+    let y_max = mse.iter().map(|(_, y)| *y).fold(0.0, f32::max) * 1.1; // Add 10% padding
 
-    // let mut chart = ChartBuilder::on(&root)
-    //     .caption("MSE vs. Matrix Size", ("sans-serif", 40).into_font())
-    //     .margin(30)
-    //     .x_label_area_size(50)
-    //     .y_label_area_size(75)
-    //     .build_cartesian_2d(x_min..x_max, 0f32..y_max)?;
+    let mut chart = ChartBuilder::on(&root)
+        .caption("MSE vs. Matrix Size", ("sans-serif", 40).into_font())
+        .margin(30)
+        .x_label_area_size(50)
+        .y_label_area_size(75)
+        .build_cartesian_2d(x_min..x_max, 0f32..y_max)?;
 
-    // chart
-    //     .configure_mesh()
-    //     .x_desc("Matrix Size (Square)")
-    //     .y_desc("Mean Squared Error (MSE)")
-    //     .light_line_style(&WHITE.mix(0.8))
-    //     .draw()?;
+    chart
+        .configure_mesh()
+        .x_desc("Matrix Size (Square)")
+        .y_desc("Mean Squared Error (MSE)")
+        .light_line_style(&WHITE.mix(0.8))
+        .draw()?;
 
-    // chart
-    //     .draw_series(LineSeries::new(mse.iter().cloned(), &RED))?
-    //     .label("MSE Trend")
-    //     .legend(|(x, y)| PathElement::new(vec![(x - 5, y), (x + 5, y)], &RED));
+    chart
+        .draw_series(LineSeries::new(mse.iter().cloned(), &RED))?
+        .label("MSE Trend")
+        .legend(|(x, y)| PathElement::new(vec![(x - 5, y), (x + 5, y)], &RED));
 
-    // chart.draw_series(
-    //     mse.iter()
-    //         .map(|(x, y)| Circle::new((*x, *y), 3, RED.filled())),
-    // )?;
+    chart.draw_series(
+        mse.iter()
+            .map(|(x, y)| Circle::new((*x, *y), 3, RED.filled())),
+    )?;
 
-    // chart
-    //     .configure_series_labels()
-    //     .background_style(&WHITE.mix(0.8))
-    //     .border_style(&BLACK)
-    //     .draw()?;
+    chart
+        .configure_series_labels()
+        .background_style(&WHITE.mix(0.8))
+        .border_style(&BLACK)
+        .draw()?;
 
-    // root.present()?;
+    root.present()?;
 
     Ok(())
 }

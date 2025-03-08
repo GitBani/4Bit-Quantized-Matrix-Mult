@@ -51,6 +51,7 @@ pub struct AffineQuantizer {
 
 impl AffineQuantizer {
     pub fn new(min_val: f32, max_val: f32) -> Self {
+        // to avoid edge case of min_val = max_val, pad range
         let min_val = min_val - 1e-6;
         let max_val = max_val + 1e-6;
         let scale = (max_val - min_val) / 15.0; // 4-bit range
