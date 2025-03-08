@@ -1,4 +1,5 @@
 use rand::Rng;
+use std::cmp::Ordering;
 use std::ops::Range;
 use std::{arch::x86_64::*, mem};
 
@@ -111,45 +112,39 @@ impl Matrix<u8> {
 
     pub fn random_sparse_quantized_square(dimension: usize) -> Self {
         let mut data = vec![];
-        let mut rng = rand::rng();
 
-        if dimension == 1 {
+        let rand_packed = || {
+            let mut rng = rand::rng();
             if rng.random::<f32>() > 0.67 {
-                data.push(rng.random_range(0_u8..15_u8));
+                let nibble1 = rng.random_range(0_u8..15_u8);
+                let nibble2 = rng.random_range(0_u8..15_u8);
+                let packed = (nibble2 << 4) + nibble1;
+                packed
             } else {
-                data.push(0);
+                0u8
             }
+        };
+        let rand_single = || {
+            let mut rng = rand::rng();
+            if rng.random::<f32>() > 0.67 {
+                rng.random_range(0_u8..15_u8)
+            } else {
+                0u8
+            }
+        };
 
-            return Matrix {
-                data,
-                rows: dimension,
-                cols: dimension,
-            };
-        }
-
-        let odd = (dimension & 1) == 1;
+        let d_bytes = (dimension + 1) / 2;
+        let rem = dimension % 2;
 
         // for each row
         for _ in 0..dimension {
-            // for each pair in row
-            for _ in (0..(dimension + 1) / 2).step_by(2) {
-                if rng.random::<f32>() > 0.67 {
-                    let nibble1 = rng.random_range(0_u8..15_u8);
-                    let nibble2 = rng.random_range(0_u8..15_u8);
-                    let packed = (nibble2 << 4) + nibble1;
-                    data.push(packed);
-                } else {
-                    data.push(0);
-                }
+            for _ in 0..(d_bytes - rem) {
+                data.push(rand_packed());
             }
 
             // last in odd row is padded with a 0
-            if odd {
-                if rng.random::<f32>() > 0.67 {
-                    data.push(rng.random_range(0_u8..15_u8));
-                } else {
-                    data.push(0);
-                }
+            if rem == 1 {
+                data.push(rand_single());
             }
         }
 
@@ -441,9 +436,18 @@ impl Matrix<u8> {
             extract_nibbles_into_regs(col_bytes, blocked_depth_bytes, depth_bytes)
         });
 
-        dbg!(depth, blocked_depth, blocked_depth_bytes, depth_bytes);
-        dbg!(lhs_rows.len());
-        dbg!(rhs_cols.len());
+        dbg!(&self);
+        for x in lhs_rows {
+            for reg in x.0 {
+                let mut v = [0; 8];
+                _mm256_storeu_si256(v.as_mut_ptr() as *mut __m256i, reg);
+                println!("{v:?}");
+            }
+        }
+
+        // dbg!(depth, blocked_depth, blocked_depth_bytes, depth_bytes);
+        // dbg!(lhs_rows.len());
+        // dbg!(rhs_cols.len());
 
         // let zipped = lhs_rows.cycle().take(lhs_rows.len() * )
 
@@ -554,7 +558,7 @@ fn fixed_point_multiply(a: i32, b: i32) -> i32 {
 }
 
 #[derive(PartialEq, Debug)]
-pub struct QCsrMatrix<T> {
+pub struct CsrMatrix<T> {
     pub data: Vec<T>,
     pub col_index: Vec<usize>,
     pub row_index: Vec<usize>,
@@ -562,9 +566,50 @@ pub struct QCsrMatrix<T> {
     pub cols: usize,
 }
 
-impl QCsrMatrix<u8> {
+impl CsrMatrix<u8> {
+    pub fn new(rows: usize, cols: usize) -> Self {
+        CsrMatrix {
+            data: vec![],
+            col_index: vec![],
+            row_index: vec![],
+            rows,
+            cols,
+        }
+    }
     // Convert *quantized* matrix into CSR representation
-    pub fn from(qm: &Matrix<u8>) -> Self {
+    pub fn from(m: &Matrix<u8>) -> Self {
+        let mut data = vec![];
+        let mut col_index = vec![];
+        let mut row_index = vec![0];
+
+        let mut r_idx = 0;
+        for row in m.data.chunks(m.cols) {
+            for (c_idx, &element) in row.iter().enumerate() {
+                if element == 0 {
+                    continue;
+                }
+
+                data.push(element);
+                col_index.push(c_idx);
+                r_idx += 1;
+            }
+            row_index.push(r_idx);
+        }
+
+        if data.len() == 0 {
+            row_index = vec![];
+        }
+
+        CsrMatrix {
+            data,
+            col_index,
+            row_index,
+            rows: m.rows,
+            cols: m.cols,
+        }
+    }
+
+    pub fn from_packed_quantized(qm: &Matrix<u8>) -> Self {
         // quantized matrices are packed
         let qrowsize = (qm.cols + 1) / 2;
 
@@ -590,7 +635,7 @@ impl QCsrMatrix<u8> {
             row_index = vec![];
         }
 
-        QCsrMatrix {
+        CsrMatrix {
             data,
             col_index,
             row_index,
@@ -599,13 +644,114 @@ impl QCsrMatrix<u8> {
         }
     }
 
-    pub fn csr_qmultiply(&self, other: &QCscMatrix<u8>) {
-        // enumerate, take, for each vec mul and add if col/row indices are the same
+    pub fn csr_qmultiply(
+        &self,
+        other: &CscMatrix<u8>,
+        lhs_offset: i32,
+        rhs_offset: i32,
+        result_offset: i32,
+        q_multiplier: i32,
+        rshift: i32,
+    ) -> CsrMatrix<u8> {
+        let mut accumulators = vec![];
+        let mut result_col_index = vec![];
+        let mut result_row_index = Vec::<usize>::with_capacity(self.rows + 1);
+        result_row_index.push(0);
+
+        let mut rhs_offset_vec = vec![0; self.cols];
+        let mut lhs_offset_vec = vec![0; other.rows];
+
+        let row_len = self.row_index.len();
+        let col_len = other.col_index.len();
+
+        if row_len == 0 || col_len == 0 {
+            return CsrMatrix::new(self.rows, other.cols);
+        }
+
+        for (row_num, &row_ptr) in self.row_index[..row_len - 1].iter().enumerate() {
+            let row_start = row_ptr;
+            let row_end = self.row_index[row_num + 1];
+
+            rhs_offset_vec[row_num] = self.data[row_start..row_end]
+                .iter()
+                .map(|&x| x as i32)
+                .sum::<i32>()
+                * rhs_offset;
+
+            for (col_num, &col_ptr) in other.col_index[..col_len - 1].iter().enumerate() {
+                let col_start = col_ptr;
+                let col_end = other.col_index[col_num + 1];
+
+                lhs_offset_vec[col_num] = other.data[col_start..col_end]
+                    .iter()
+                    .map(|&x| x as i32)
+                    .sum::<i32>()
+                    * lhs_offset;
+
+                let mut lhs_ptr = row_start;
+                let mut rhs_ptr = col_start;
+
+                let mut sum = 0;
+                while lhs_ptr < row_end && rhs_ptr < col_end {
+                    match self.col_index[lhs_ptr].cmp(&other.row_index[rhs_ptr]) {
+                        Ordering::Equal => {
+                            let lhs_byte = self.data[lhs_ptr];
+                            let (lhs_lo, lhs_hi) = (lhs_byte & 0x0F, lhs_byte >> 4);
+
+                            let rhs_byte = other.data[rhs_ptr];
+                            let (rhs_lo, rhs_hi) = (rhs_byte & 0x0F, rhs_byte >> 4);
+
+                            sum += lhs_lo as i32 * rhs_lo as i32 + lhs_hi as i32 * rhs_hi as i32;
+                            lhs_ptr += 1;
+                            rhs_ptr += 1;
+                        }
+                        Ordering::Greater => rhs_ptr += 1,
+                        Ordering::Less => lhs_ptr += 1,
+                    }
+                }
+
+                accumulators.push(sum);
+                result_col_index.push(col_num);
+            }
+
+            result_row_index.push(accumulators.len());
+        }
+
+        // add offsets and multiplier
+        let mut result = vec![];
+        let depth = self.cols as i32;
+        let res_row_len = result_row_index.len();
+
+        for (i, &row_start) in result_row_index[..res_row_len - 1].iter().enumerate() {
+            let row_end = result_row_index[i + 1];
+
+            for (j, _) in (row_start..row_end).enumerate() {
+                let with_offset = accumulators[row_start + j]
+                    + lhs_offset_vec[result_col_index[row_start + j]]
+                    + rhs_offset_vec[i]
+                    + lhs_offset * rhs_offset * depth;
+                let with_multiplier = result_offset
+                    + rounding_rshift(fixed_point_multiply(with_offset, q_multiplier), rshift);
+                let casted = with_multiplier.clamp(0, 15) as u8;
+
+                if casted != 0 {
+                    result.push(casted);
+                }
+            }
+        }
+
+        CsrMatrix {
+            data: result,
+            col_index: result_col_index,
+            row_index: result_row_index,
+            rows: self.rows,
+            cols: other.cols,
+        }
     }
 }
 
 #[derive(PartialEq, Debug)]
-pub struct QCscMatrix<T> {
+pub struct CscMatrix<T> {
     pub data: Vec<T>,
     pub row_index: Vec<usize>,
     pub col_index: Vec<usize>,
@@ -613,24 +759,36 @@ pub struct QCscMatrix<T> {
     pub cols: usize,
 }
 
-impl QCscMatrix<u8> {
+impl CscMatrix<u8> {
     // Convert a *quantized* matrix in *column-major order* to CSC representation
     pub fn from(m: &Matrix<u8>) -> Self {
-        let csr_from_transpose = QCsrMatrix::from(&m);
-        QCscMatrix {
-            data: csr_from_transpose.data,
+        let csr_of_col_major = CsrMatrix::from(&m);
+        CscMatrix {
+            data: csr_of_col_major.data,
             // flip row and col index vectors (function expects row-major and generates CSR, this is col-major thus ends up in CSC)
-            row_index: csr_from_transpose.col_index,
-            col_index: csr_from_transpose.row_index,
-            rows: csr_from_transpose.rows,
-            cols: csr_from_transpose.cols,
+            row_index: csr_of_col_major.col_index,
+            col_index: csr_of_col_major.row_index,
+            rows: csr_of_col_major.rows,
+            cols: csr_of_col_major.cols,
+        }
+    }
+
+    pub fn from_packed_quantized(qm: &Matrix<u8>) -> Self {
+        let csr_of_col_major = CsrMatrix::from_packed_quantized(&qm);
+        CscMatrix {
+            data: csr_of_col_major.data,
+            // flip row and col index vectors (function expects row-major and generates CSR, this is col-major thus ends up in CSC)
+            row_index: csr_of_col_major.col_index,
+            col_index: csr_of_col_major.row_index,
+            rows: csr_of_col_major.rows,
+            cols: csr_of_col_major.cols,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::quantization::AffineQuantizer;
+    use crate::quantization::{quantize_multiplier, AffineQuantizer};
 
     use super::*;
 
@@ -755,39 +913,55 @@ mod tests {
 
     #[test]
     fn test() {
-        let rhs = Matrix::random_sparse_quantized_square(21);
-        let lhs = Matrix::random_sparse_quantized_square(21);
+        let rhs = Matrix::random_sparse_quantized_square(9);
+        let lhs = Matrix::random_sparse_quantized_square(9);
+        dbg!(lhs.data.len());
         _ = unsafe { lhs.qmultiply_simd_fp(&rhs, 0, 0, 0, 0, 0) };
     }
     // todo make this actual tests
     #[test]
     fn test_csr() {
-        let d = 4;
-        let qm = Matrix::random_sparse_quantized_square(d);
-        let csr = QCsrMatrix::from(&qm);
-        let csc = QCscMatrix::from(&qm);
-        qm.data.chunks((d + 1) / 2).for_each(|x| {
-            println!("{x:?}");
-        });
-        dbg!(&csr);
-        dbg!(&csc);
+        let d = 3;
+        let lhs = Matrix::random_sparse_quantized_square(d);
+        let rhs = Matrix::random_sparse_quantized_square(d);
+        dbg!(&lhs, &rhs);
 
-        // let m = Matrix {
-        //     data: vec![5, 0, 0, 0, 0, 8, 0, 0, 0, 0, 3, 0, 0, 6, 0, 0],
-        //     rows: 4,
-        //     cols: 4,
-        // };
-        // let csr = CsrMatrix::from(&m);
-        // dbg!(&csr);
+        let lhs_quantizer = AffineQuantizer::new(-5.0, 5.0);
+        let rhs_quantizer = AffineQuantizer::new(-5.0, 5.0);
+        let result_quantizer = AffineQuantizer::new(-5.0, 5.0);
 
-        // let m = Matrix {
-        //     data: vec![0; 16],
-        //     rows: 4,
-        //     cols: 4,
-        // };
-        // let csr = CsrMatrix::from(&m);
+        let lhs_offset = -(lhs_quantizer.zero as i32);
+        let rhs_offset = -(rhs_quantizer.zero as i32);
+        let result_offset = result_quantizer.zero as i32;
 
-        // dbg!(&csr);
+        let real_multiplier = lhs_quantizer.scale * rhs_quantizer.scale / result_quantizer.scale;
+        let (q_multiplier, rshift) = quantize_multiplier(real_multiplier);
+
+        let res = lhs.qmultiply(
+            &rhs,
+            lhs_offset,
+            rhs_offset,
+            result_offset,
+            q_multiplier,
+            rshift,
+        );
+        dbg!(&res);
+        let expected = CsrMatrix::from(&res);
+        dbg!(&expected);
+
+        let csr = CsrMatrix::from_packed_quantized(&lhs);
+        let csc = CscMatrix::from_packed_quantized(&rhs);
+        dbg!(&csr, &csc);
+
+        let actual = csr.csr_qmultiply(
+            &csc,
+            lhs_offset,
+            rhs_offset,
+            result_offset,
+            q_multiplier,
+            rshift,
+        );
+        dbg!(&actual);
     }
 
     #[test]
@@ -797,7 +971,7 @@ mod tests {
             rows: 3,
             cols: 3,
         };
-        let csc = QCscMatrix::from(&m);
+        let csc = CscMatrix::from_packed_quantized(&m);
         dbg!(&csc);
     }
 }
