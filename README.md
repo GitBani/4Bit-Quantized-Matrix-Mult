@@ -1,19 +1,25 @@
 # 4-Bit Quantized Matrix Multiplication
-In this lab, I explore 4-bit quantized matrix multiplication, using FP32 matrix multiplication as the baseline.
+In this lab, I explore 4-bit quantized matrix multiplication, using BLAS' FP32 matrix multiplication as the baseline.
 
 ## 4-Bit Affine Quantization
 Affine quantization maps float values $x\in [x_{\min},\ x_{\max}]$ to some $q\in [q_{\min},\ q_{\max}]$ by the following scheme:
+
 $$q = \text{round}(\frac{x}{S} + Z)$$
+
 where $S,Z$ are the quantization parameters.
 
 The real value can be restored by:
+
 $$x^\prime = S(q - Z)$$
+
 however, in general $x\neq x^\prime$. Their difference makes up the quantization error.
  
-
 $S$ scales the input range to the output range, and $Z$ is the zero point, ensuring that the 0 of the input range is perfectly mapped to it.
+
 $$S=\frac{x_{\max}-x_{\min}}{q_{\max}-q_{\min}}$$
+
 $$Z=q_{\min} - \frac{x_{\min}}{S}$$
+
 In this lab, the quantization range is $[0,\ 15]$ since we are quantizing to 4-bit values. 
 
 In practice, it's possible to get an input value which is outside of the input range. For example, when quantizing a matrix, outlier values can be excluded from the range to reduce their impact on the majority of values. However, this means that the output $q$ can end up outside of the output range. To handle this, I decided to clamp the output value to the range.
