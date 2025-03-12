@@ -9,6 +9,12 @@ pub fn quantize_and_pack(quantizer: &impl Quantizer4Bit, v1: f32, v2: f32) -> u8
     (q2 << 4) + q1
 }
 
+pub fn unpack_and_dequantize(quantizer: &impl Quantizer4Bit, q: u8) -> (f32, f32) {
+    let f1 = quantizer.dequantize(q & 0x0F);
+    let f2 = quantizer.dequantize(q >> 4);
+    (f1, f2)
+}
+
 /// Given a real_multiplier in (0, 1), produces a quantize_multiplier (in Q31 format), rshift pair that can be used to to approximate:
 /// real_multiplier * x
 ///

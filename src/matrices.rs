@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::ops::Range;
 use std::{arch::x86_64::*, mem};
 
-use crate::quantization::{quantize_and_pack, Quantizer4Bit};
+use crate::quantization::{quantize_and_pack, unpack_and_dequantize, Quantizer4Bit};
 
 #[derive(PartialEq, Debug)]
 pub struct Matrix<T> {
@@ -103,8 +103,23 @@ impl Matrix<f32> {
 
 impl Matrix<u8> {
     pub fn dequantize(&self, quantizer: &impl Quantizer4Bit) -> Matrix<f32> {
+        let mut data = vec![];
+        let rem = self.cols % 2;
+
+        for row in self.data.chunks(self.cols) {
+            for i in 0..self.cols - rem {
+                let (f1, f2) = unpack_and_dequantize(quantizer, row[i]);
+                data.push(f1);
+                data.push(f2);
+            }
+            if rem == 1 {
+                let f = quantizer.dequantize(row[self.cols - 1]);
+                data.push(f);
+            }
+        }
+
         Matrix {
-            data: self.data.iter().map(|&q| quantizer.dequantize(q)).collect(),
+            data,
             rows: self.rows,
             cols: self.cols,
         }
@@ -284,20 +299,41 @@ impl Matrix<u8> {
             first = false;
         }
 
+        // add offsets and multiplier, repack the 4-bit values in the resulting matrix
         let mut result = Vec::with_capacity(accumulators.len());
+        let odd_cols = (other.cols & 1) == 1;
 
-        // add offsets and multiplier
         let depth = self.cols as i32;
         for i in 0..self.rows {
             let row_start = i * other.cols;
-            for j in 0..other.cols {
-                let with_offset = accumulators[row_start + j]
+            // handle pairs to pack
+            for j in (0..other.cols - 1).step_by(2) {
+                let with_offset_lo = accumulators[row_start + j]
                     + lhs_offset_vec[j]
+                    + rhs_offset_vec[i]
+                    + lhs_offset * rhs_offset * depth;
+                let with_multiplier_lo = result_offset
+                    + rounding_rshift(fixed_point_multiply(with_offset_lo, q_multiplier), rshift);
+
+                let with_offset_hi = accumulators[row_start + j + 1]
+                    + lhs_offset_vec[j + 1]
+                    + rhs_offset_vec[i]
+                    + lhs_offset * rhs_offset * depth;
+                let with_multiplier_hi = result_offset
+                    + rounding_rshift(fixed_point_multiply(with_offset_hi, q_multiplier), rshift);
+
+                let packed = ((with_multiplier_hi.clamp(0, 15) as u8) << 4)
+                    + with_multiplier_lo.clamp(0, 15) as u8;
+                result.push(packed);
+            }
+            // handle remainder element
+            if odd_cols {
+                let with_offset = accumulators[row_start + other.cols - 1]
+                    + lhs_offset_vec[other.cols - 1]
                     + rhs_offset_vec[i]
                     + lhs_offset * rhs_offset * depth;
                 let with_multiplier = result_offset
                     + rounding_rshift(fixed_point_multiply(with_offset, q_multiplier), rshift);
-
                 result.push(with_multiplier.clamp(0, 15) as u8);
             }
         }
@@ -390,18 +426,40 @@ impl Matrix<u8> {
             first = false;
         }
 
-        // add offsets and multiplier
+        // add offsets and multiplier, repack the 4-bit values in the resulting matrix
         let depth = self.cols as i32;
+        let odd_cols = (other.cols & 1) == 1;
+
         for i in 0..self.rows {
             let row_start = i * other.cols;
-            for j in 0..other.cols {
-                let with_offset = accumulators[row_start + j]
+            // handle pairs to pack
+            for j in (0..other.cols - 1).step_by(2) {
+                let with_offset_lo = accumulators[row_start + j]
                     + lhs_offset_vec[j]
+                    + rhs_offset_vec[i]
+                    + lhs_offset * rhs_offset * depth;
+                let with_multiplier_lo = result_offset
+                    + rounding_rshift(fixed_point_multiply(with_offset_lo, q_multiplier), rshift);
+
+                let with_offset_hi = accumulators[row_start + j + 1]
+                    + lhs_offset_vec[j + 1]
+                    + rhs_offset_vec[i]
+                    + lhs_offset * rhs_offset * depth;
+                let with_multiplier_hi = result_offset
+                    + rounding_rshift(fixed_point_multiply(with_offset_hi, q_multiplier), rshift);
+
+                let packed = ((with_multiplier_hi.clamp(0, 15) as u8) << 4)
+                    + with_multiplier_lo.clamp(0, 15) as u8;
+                result.push(packed);
+            }
+            // handle remainder element
+            if odd_cols {
+                let with_offset = accumulators[row_start + other.cols - 1]
+                    + lhs_offset_vec[other.cols - 1]
                     + rhs_offset_vec[i]
                     + lhs_offset * rhs_offset * depth;
                 let with_multiplier = result_offset
                     + rounding_rshift(fixed_point_multiply(with_offset, q_multiplier), rshift);
-
                 result.push(with_multiplier.clamp(0, 15) as u8);
             }
         }

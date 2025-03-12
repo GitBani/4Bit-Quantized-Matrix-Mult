@@ -185,106 +185,127 @@ fn quantize(matrix: &Self, dst: &mut Matrix<u8>, quantizer: &impl Quantizer4Bit)
 This would later cause problems for SIMD vectorization. For my first implementation, there was no issue.
 ```Rust
 pub fn qmultiply(
-        &self,
-        other: &Self,
-        lhs_offset: i32,
-        rhs_offset: i32,
-        result_offset: i32,
-        q_multiplier: i32,
-        rshift: i32,
-    ) -> Matrix<u8> {
-        let mut accumulators = Vec::<i32>::with_capacity(self.rows * other.cols);
+    &self,
+    other: &Self,
+    lhs_offset: i32,
+    rhs_offset: i32,
+    result_offset: i32,
+    q_multiplier: i32,
+    rshift: i32,
+) -> Matrix<u8> {
+    let mut accumulators = Vec::<i32>::with_capacity(self.rows * other.cols);
 
-        // stores extracted nibbles
-        let mut lhs_row = Vec::<u8>::with_capacity(self.cols);
-        unsafe { lhs_row.set_len(self.cols) };
-        let mut rhs_col = Vec::<u8>::with_capacity(other.rows);
-        unsafe { rhs_col.set_len(other.rows) };
+    // stores extracted nibbles
+    let mut lhs_row = Vec::<u8>::with_capacity(self.cols);
+    unsafe { lhs_row.set_len(self.cols) };
+    let mut rhs_col = Vec::<u8>::with_capacity(other.rows);
+    unsafe { rhs_col.set_len(other.rows) };
 
-        // to determine which nibble of byte to get
-        let mut lower_bits_lhs = true;
+    // to determine which nibble of byte to get
+    let mut lower_bits_lhs = true;
 
-        // store vectors that are a part of the optimization trick for adding offsets described above
-        let mut rhs_offset_vec = Vec::with_capacity(self.cols);
-        let mut lhs_offset_vec = Vec::with_capacity(other.rows);
+    // store vectors that are a part of the optimization trick for adding offsets described above
+    let mut rhs_offset_vec = Vec::with_capacity(self.cols);
+    let mut lhs_offset_vec = Vec::with_capacity(other.rows);
 
-        // only calculate lhs_offset_vec on first iteration
-        let mut first = true;
+    // only calculate lhs_offset_vec on first iteration
+    let mut first = true;
 
-        let mut i = 0;
-        for _ in 0..self.rows {
-            // Get next row from nibbles
-            for row_idx in 0..self.cols {
+    let mut i = 0;
+    for _ in 0..self.rows {
+        // Get next row from nibbles
+        for row_idx in 0..self.cols {
+            let next_val;
+            if lower_bits_lhs {
+                next_val = self.data[i] & 0x0F
+            } else {
+                next_val = self.data[i] >> 4;
+                i += 1;
+            }
+            lower_bits_lhs = !lower_bits_lhs;
+            lhs_row[row_idx] = next_val;
+        }
+
+        rhs_offset_vec.push(lhs_row.iter().map(|&x| x as i32).sum::<i32>() * rhs_offset);
+
+        let mut j = 0;
+        let mut lower_bits_rhs = true;
+        for _ in 0..other.cols {
+            // Get next col from nibbles
+            for col_idx in 0..other.rows {
                 let next_val;
-                if lower_bits_lhs {
-                    next_val = self.data[i] & 0x0F
+                if lower_bits_rhs {
+                    next_val = other.data[j] & 0x0F
                 } else {
-                    next_val = self.data[i] >> 4;
-                    i += 1;
+                    next_val = other.data[j] >> 4;
+                    j += 1;
                 }
-                lower_bits_lhs = !lower_bits_lhs;
-                lhs_row[row_idx] = next_val;
+                lower_bits_rhs = !lower_bits_rhs;
+                rhs_col[col_idx] = next_val;
             }
 
-            rhs_offset_vec.push(lhs_row.iter().map(|&x| x as i32).sum::<i32>() * rhs_offset);
-
-            let mut j = 0;
-            let mut lower_bits_rhs = true;
-            for _ in 0..other.cols {
-                // Get next col from nibbles
-                for col_idx in 0..other.rows {
-                    let next_val;
-                    if lower_bits_rhs {
-                        next_val = other.data[j] & 0x0F
-                    } else {
-                        next_val = other.data[j] >> 4;
-                        j += 1;
-                    }
-                    lower_bits_rhs = !lower_bits_rhs;
-                    rhs_col[col_idx] = next_val;
-                }
-
-                if first {
-                    lhs_offset_vec
-                        .push(rhs_col.iter().map(|&x| x as i32).sum::<i32>() * lhs_offset);
-                }
-
-                let mut accumulator: i32 = 0;
-                for k in 0..self.cols {
-                    accumulator += lhs_row[k] as i32 * rhs_col[k] as i32;
-                }
-                accumulators.push(accumulator);
+            if first {
+                lhs_offset_vec
+                    .push(rhs_col.iter().map(|&x| x as i32).sum::<i32>() * lhs_offset);
             }
 
-            first = false;
+            let mut accumulator: i32 = 0;
+            for k in 0..self.cols {
+                accumulator += lhs_row[k] as i32 * rhs_col[k] as i32;
+            }
+            accumulators.push(accumulator);
         }
 
-        let mut result = Vec::with_capacity(accumulators.len());
+        first = false;
+    }
 
-        // add offsets and multiplier
-        let depth = self.cols as i32;
-        for i in 0..self.rows {
-            let row_start = i * other.cols;
-            for j in 0..other.cols {
-                let with_offset = accumulators[row_start + j]
-                    + lhs_offset_vec[j]
-                    + rhs_offset_vec[i]
-                    + lhs_offset * rhs_offset * depth;
-                let with_multiplier = result_offset
-                    + rounding_rshift(fixed_point_multiply(with_offset, q_multiplier), rshift);
+    // add offsets and multiplier, repack the 4-bit values in the resulting matrix
+    let mut result = Vec::with_capacity(accumulators.len());
+    let odd_cols = (other.cols & 1) == 1;
 
-                result.push(with_multiplier.clamp(0, 15) as u8);
-            }
+    let depth = self.cols as i32;
+    for i in 0..self.rows {
+        let row_start = i * other.cols;
+        // handle pairs to pack
+        for j in (0..other.cols - 1).step_by(2) {
+            let with_offset_lo = accumulators[row_start + j]
+                + lhs_offset_vec[j]
+                + rhs_offset_vec[i]
+                + lhs_offset * rhs_offset * depth;
+            let with_multiplier_lo = result_offset
+                + rounding_rshift(fixed_point_multiply(with_offset_lo, q_multiplier), rshift);
+
+            let with_offset_hi = accumulators[row_start + j + 1]
+                + lhs_offset_vec[j + 1]
+                + rhs_offset_vec[i]
+                + lhs_offset * rhs_offset * depth;
+            let with_multiplier_hi = result_offset
+                + rounding_rshift(fixed_point_multiply(with_offset_hi, q_multiplier), rshift);
+
+            let packed = ((with_multiplier_hi.clamp(0, 15) as u8) << 4)
+                + with_multiplier_lo.clamp(0, 15) as u8;
+            result.push(packed);
         }
-
-        Matrix {
-            data: result,
-            rows: self.rows,
-            cols: other.cols,
+        // handle remainder element
+        if odd_cols {
+            let with_offset = accumulators[row_start + other.cols - 1]
+                + lhs_offset_vec[other.cols - 1]
+                + rhs_offset_vec[i]
+                + lhs_offset * rhs_offset * depth;
+            let with_multiplier = result_offset
+                + rounding_rshift(fixed_point_multiply(with_offset, q_multiplier), rshift);
+            result.push(with_multiplier.clamp(0, 15) as u8);
         }
     }
+
+    Matrix {
+        data: result,
+        rows: self.rows,
+        cols: other.cols,
+    }
+}
 ```
-I built the RHS offset column vector and LHS offset row vector as I extracted each vector. I made sure not to recalculate this every time I extract the column vectors (using the `first` variable). At first, I returned a `Matrix<i32>`, directly returning the accumulated values. I changed that to `u8`, and I should have also packed the result to save space.
+I built the RHS offset column vector and LHS offset row vector as I extracted each vector. I made sure not to recalculate this every time I extract the column vectors (using the `first` variable). At the end, I add the offset column and row vectors to the corresponding accumulators, and multiply (using fixed-point multiplication) that result by the scaling factor. Finally, I cast the resulting value back into a `u8` representing a 4-bit value and repack the result.
 
 My improved implementation added SIMD intrinsics (specifically: avx2), but first I address the issue I mentioned above about row/column boundaries being in between bytes. I updated the quantization of matrices, sacrificing some storage saving in the process (only when the depth of the matrix multiplication is odd - otherwise there is no sacrifice).
 ```Rust
@@ -402,18 +423,40 @@ pub unsafe fn qmultiply_simd(
         first = false;
     }
 
-    // add offsets and multiplier
+    // add offsets and multiplier, repack the 4-bit values in the resulting matrix
     let depth = self.cols as i32;
+    let odd_cols = (other.cols & 1) == 1;
+
     for i in 0..self.rows {
         let row_start = i * other.cols;
-        for j in 0..other.cols {
-            let with_offset = accumulators[row_start + j]
+        // handle pairs to pack
+        for j in (0..other.cols - 1).step_by(2) {
+            let with_offset_lo = accumulators[row_start + j]
                 + lhs_offset_vec[j]
+                + rhs_offset_vec[i]
+                + lhs_offset * rhs_offset * depth;
+            let with_multiplier_lo = result_offset
+                + rounding_rshift(fixed_point_multiply(with_offset_lo, q_multiplier), rshift);
+
+            let with_offset_hi = accumulators[row_start + j + 1]
+                + lhs_offset_vec[j + 1]
+                + rhs_offset_vec[i]
+                + lhs_offset * rhs_offset * depth;
+            let with_multiplier_hi = result_offset
+                + rounding_rshift(fixed_point_multiply(with_offset_hi, q_multiplier), rshift);
+
+            let packed = ((with_multiplier_hi.clamp(0, 15) as u8) << 4)
+                + with_multiplier_lo.clamp(0, 15) as u8;
+            result.push(packed);
+        }
+        // handle remainder element
+        if odd_cols {
+            let with_offset = accumulators[row_start + other.cols - 1]
+                + lhs_offset_vec[other.cols - 1]
                 + rhs_offset_vec[i]
                 + lhs_offset * rhs_offset * depth;
             let with_multiplier = result_offset
                 + rounding_rshift(fixed_point_multiply(with_offset, q_multiplier), rshift);
-
             result.push(with_multiplier.clamp(0, 15) as u8);
         }
     }
